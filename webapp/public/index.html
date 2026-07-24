@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IRL-Books</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>📚 IRL-Books</h1>
+  <div class="controls">
+    <input id="search" type="search" placeholder="Title, author, publisher, ISBN…">
+    <select id="library-filter">
+      <option value="">All rooms</option>
+    </select>
+    <select id="genre-filter">
+      <option value="">All genres</option>
+    </select>
+    <div class="flag-filters">
+      <label title="Loaned"><input type="checkbox" data-flag="loaned"> 🤝</label>
+      <label title="No cover"><input type="checkbox" data-flag="no_cover"> 🖼️</label>
+      <label title="No ISBN"><input type="checkbox" data-flag="no_isbn"> #️⃣</label>
+    </div>
+    <button id="select-toggle-btn" class="secondary icon-btn" title="Select">☑️</button>
+    <button id="add-book-btn" class="primary icon-btn" title="Add a book">➕</button>
+    <button id="scan-book-btn" class="primary icon-btn" title="Scan a book">📷</button>
+    <a href="/settings.html" class="secondary icon-btn" title="Settings">⚙️</a>
+  </div>
+  <div class="status" id="status"></div>
+</header>
+
+<div id="selection-bar" class="selection-bar hidden">
+  <label title="Select all"><input type="checkbox" id="select-all"> ☑️</label>
+  <span id="selection-count">0 selected</span>
+  <select id="move-target">
+    <option value="">📦 Move to…</option>
+  </select>
+  <button id="move-btn" class="primary icon-btn" title="Move" disabled>📦</button>
+  <select id="genre-target">
+    <option value="">🏷️ Change genre…</option>
+  </select>
+  <button id="genre-btn" class="primary icon-btn" title="Apply genre" disabled>🏷️</button>
+  <button id="cancel-select-btn" class="secondary icon-btn" title="Cancel">✕</button>
+</div>
+
+<main>
+  <div id="grid" class="grid"></div>
+  <p id="empty" class="empty hidden">No book matches these criteria.</p>
+</main>
+
+<div id="detail-overlay" class="overlay hidden">
+  <div class="modal detail-modal">
+    <button class="close-btn" data-close title="Close">×</button>
+    <div id="detail-content"></div>
+  </div>
+</div>
+
+<div id="quick-library-overlay" class="overlay hidden">
+  <div class="modal quick-pick-modal">
+    <button class="close-btn" data-close title="Close">×</button>
+    <h2>Move</h2>
+    <p id="quick-library-title" class="quick-pick-title"></p>
+    <select id="quick-library-select"></select>
+    <p id="quick-library-status" class="quick-pick-status"></p>
+  </div>
+</div>
+
+<div id="quick-genre-overlay" class="overlay hidden">
+  <div class="modal quick-pick-modal">
+    <button class="close-btn" data-close title="Close">×</button>
+    <h2>Genre</h2>
+    <p id="quick-genre-title" class="quick-pick-title"></p>
+    <select id="quick-genre-select"></select>
+    <p id="quick-genre-status" class="quick-pick-status"></p>
+  </div>
+</div>
+
+<div id="duplicate-overlay" class="overlay hidden">
+  <div class="modal quick-pick-modal">
+    <button type="button" id="duplicate-close-btn" class="close-btn" title="Close">×</button>
+    <h2>Book already in the library</h2>
+    <p id="duplicate-title" class="quick-pick-title"></p>
+    <p id="duplicate-room-note" class="quick-pick-status"></p>
+    <div class="duplicate-actions">
+      <button type="button" id="duplicate-move-btn" class="secondary hidden"></button>
+      <button type="button" id="duplicate-open-btn" class="primary icon-btn" title="Open record">📖</button>
+      <button type="button" id="duplicate-ignore-btn" class="secondary"></button>
+    </div>
+  </div>
+</div>
+
+<div id="scan-overlay" class="overlay hidden">
+  <div class="modal scan-modal">
+    <button type="button" id="scan-close-btn" class="close-btn" title="Close">×</button>
+    <h2>Scan a barcode</h2>
+    <video id="scan-video" muted playsinline></video>
+    <p id="scan-status" class="scan-status"></p>
+  </div>
+</div>
+
+<div id="add-overlay" class="overlay hidden">
+  <div class="modal">
+    <button class="close-btn" data-close title="Close">×</button>
+    <h2>Add a book</h2>
+    <form id="add-form">
+      <div class="form-grid">
+        <label class="cover-picker">
+          <input type="file" id="cover-input" accept="image/*">
+          <img id="cover-preview" src="/nocover.jpg" alt="Cover">
+          <span title="Choose a cover">🖼️</span>
+        </label>
+        <div class="fields">
+          <label class="full">ISBN
+            <div class="isbn-row">
+              <input name="isbn" type="text" id="isbn-input" inputmode="numeric" placeholder="9782020796569">
+              <button type="button" id="isbn-scan-btn" class="secondary icon-btn" title="Scan the barcode">📷</button>
+              <button type="button" id="isbn-lookup-btn" class="secondary icon-btn" title="Look up">🔎</button>
+            </div>
+            <span id="isbn-lookup-status" class="isbn-lookup-status"></span>
+          </label>
+          <label>Title *<input required name="title" type="text"></label>
+          <label>Author(s), comma-separated<input name="authors" type="text"></label>
+          <label>Publisher<input name="publisher" type="text"></label>
+          <label>Year<input name="publishing_year" type="number"></label>
+          <label>Edition<input name="edition" type="text"></label>
+          <label class="full">Room
+            <div class="isbn-row">
+              <select id="library-select"><option value="">Choose a room…</option></select>
+              <input name="library" type="text" id="library-input" placeholder="New room">
+            </div>
+          </label>
+          <label>Genre
+            <select name="genre" id="add-genre-select">
+              <option value="">Auto-detect</option>
+            </select>
+          </label>
+          <label class="full">Notes<textarea name="notes" rows="3"></textarea></label>
+          <div class="checkbox-row full">
+            <label title="Loaned"><input type="checkbox" name="loaned"> 🤝</label>
+          </div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <span id="add-error" class="error"></span>
+        <button type="button" id="add-another-btn" class="secondary" title="Save and add another">OK +1</button>
+        <button type="submit" class="primary icon-btn" title="Save">💾</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="/vendor/zxing.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

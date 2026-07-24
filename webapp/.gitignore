@@ -1,0 +1,4 @@
+certs/
+library.db
+library.db.bak-*
+library (Copy).db

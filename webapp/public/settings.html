@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Settings — IRL-Books</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>⚙️ Settings</h1>
+  <div class="controls">
+    <a href="/" class="secondary icon-btn" title="Back to library">←</a>
+  </div>
+</header>
+
+<main class="settings-main">
+  <section class="settings-section">
+    <h2>Rooms</h2>
+    <p class="section-intro">Renaming a room updates every book in it.</p>
+    <div id="libraries-list" class="libraries-list"></div>
+  </section>
+
+  <section class="settings-section">
+    <h2>Genres</h2>
+    <p class="section-intro">Automatic categorization by keyword on title and author (gardening, esotericism, art, novels, comics…). Books already categorized are left untouched unless you check the box below.</p>
+    <div id="genres-list" class="libraries-list"></div>
+    <div class="checkbox-row genre-overwrite-row">
+      <label><input type="checkbox" id="genre-overwrite-checkbox"> Also recategorize books that already have a genre</label>
+    </div>
+    <button id="auto-genre-btn" class="primary icon-btn" title="Auto-categorize">🏷️</button>
+    <p id="auto-genre-status" class="export-status"></p>
+  </section>
+
+  <section class="settings-section">
+    <h2>Duplicates</h2>
+    <p class="section-intro">Books sharing the same ISBN (or import identifier). Groups in red have different titles: it's almost always an ISBN error in the source data, not a real duplicate.</p>
+    <div id="duplicates-list"></div>
+  </section>
+
+  <section class="settings-section">
+    <h2>Export to Calibre</h2>
+    <p class="section-intro">Generates one EPUB per book (full metadata, generated cover if missing) in a directory ready to import into Calibre.</p>
+    <button id="export-calibre-btn" class="primary icon-btn" title="Export">📤</button>
+    <p id="export-status" class="export-status"></p>
+  </section>
+</main>
+
+<script src="/settings.js"></script>
+</body>
+</html>
