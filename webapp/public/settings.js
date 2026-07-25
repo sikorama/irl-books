@@ -14,9 +14,51 @@
     }[c]));
   }
 
+  // Même clé que le formulaire d'ajout dans app.js : régler la pièce courante
+  // ici et en filer une depuis la bibliothèque écrivent au même endroit, la
+  // dernière action gagne.
+  const CURRENT_ROOM_KEY = 'irl-books:lastLibrary';
+  const currentRoomSelect = document.getElementById('current-room-select');
+  const currentRoomInput = document.getElementById('current-room-input');
+  const currentRoomStatus = document.getElementById('current-room-status');
+
+  function describeCurrentRoom(room, known) {
+    if (!room) return 'No current room — new books will go to "Ajouts manuels".';
+    if (!known) return `New books will be filed in "${room}" (a room with no books yet).`;
+    return `New books will be filed in "${room}".`;
+  }
+
+  function renderCurrentRoom(libs) {
+    const room = localStorage.getItem(CURRENT_ROOM_KEY) || '';
+    const names = libs.map((lib) => lib.name).filter(Boolean);
+    currentRoomSelect.innerHTML = '<option value="">Choose a room…</option>'
+      + names.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+    currentRoomSelect.value = names.includes(room) ? room : '';
+    currentRoomInput.value = room;
+    currentRoomStatus.textContent = describeCurrentRoom(room, names.includes(room));
+  }
+
+  function saveCurrentRoom(room) {
+    localStorage.setItem(CURRENT_ROOM_KEY, room);
+    const known = [...currentRoomSelect.options].some((o) => o.value && o.value === room);
+    currentRoomStatus.textContent = `Saved ✓ — ${describeCurrentRoom(room, known)}`;
+  }
+
+  currentRoomSelect.addEventListener('change', () => {
+    currentRoomInput.value = currentRoomSelect.value;
+    saveCurrentRoom(currentRoomSelect.value);
+  });
+  currentRoomInput.addEventListener('change', () => {
+    const room = currentRoomInput.value.trim();
+    currentRoomInput.value = room;
+    currentRoomSelect.value = [...currentRoomSelect.options].some((o) => o.value === room) ? room : '';
+    saveCurrentRoom(room);
+  });
+
   async function loadLibraries() {
     const res = await fetch('/api/libraries');
     const libs = await res.json();
+    renderCurrentRoom(libs);
     librariesList.innerHTML = '';
     for (const lib of libs) {
       const row = document.createElement('div');
@@ -41,6 +83,11 @@
           });
           const data = await patchRes.json();
           if (!patchRes.ok) throw new Error(data.error || 'Unknown error');
+          // Renommer la pièce courante ne doit pas la laisser pointer sur un
+          // nom qui n'existe plus.
+          if (lib.name && localStorage.getItem(CURRENT_ROOM_KEY) === lib.name) {
+            localStorage.setItem(CURRENT_ROOM_KEY, newName);
+          }
           await loadLibraries();
         } catch (e) {
           alert(`Error: ${e.message}`);
@@ -142,6 +189,122 @@
     renderDuplicates(groups);
   }
 
+  const upgradeCoversBtn = document.getElementById('upgrade-covers-btn');
+  const cancelCoversBtn = document.getElementById('cancel-covers-btn');
+  const coverMinWidth = document.getElementById('cover-min-width');
+  const coverDryRun = document.getElementById('cover-dry-run');
+  const coverProgress = document.getElementById('cover-progress');
+  const coverProgressFill = document.getElementById('cover-progress-fill');
+  const coverProgressText = document.getElementById('cover-progress-text');
+  const coverProgressLog = document.getElementById('cover-progress-log');
+  const upgradeCoversStatus = document.getElementById('upgrade-covers-status');
+
+  let coverPollTimer = null;
+
+  function renderCoverJob(job) {
+    if (!job || (!job.running && !job.finished)) {
+      coverProgress.classList.add('hidden');
+      return;
+    }
+    coverProgress.classList.remove('hidden');
+
+    const total = job.total;
+    const pct = total ? Math.round((job.processed / total) * 100) : 0;
+    coverProgressFill.style.width = `${pct}%`;
+
+    const counts = `${job.upgraded} upgraded · ${job.unchanged} left alone`
+      + (job.failed ? ` · ${job.failed} failed` : '');
+    if (job.running) {
+      const position = total === null ? 'Listing covers…' : `${job.processed}/${total} (${pct}%)`;
+      const current = job.current ? ` — ${job.current.title}` : '';
+      coverProgressText.textContent = `${position} · ${counts}${current}`;
+    } else {
+      const stopped = job.cancelled ? 'Stopped' : 'Done';
+      coverProgressText.textContent = `${stopped} — ${job.processed} book(s) examined · ${counts}`;
+    }
+
+    coverProgressLog.innerHTML = job.log.map((entry) => {
+      if (entry.status === 'failed') {
+        return `<li class="failed">#${entry.id} ${escapeHtml(entry.title)} — ${escapeHtml(entry.error || 'error')}</li>`;
+      }
+      return `<li><span class="gain">${entry.width}px → ${entry.new_width}px</span> ${escapeHtml(entry.title)}</li>`;
+    }).reverse().join('');
+
+    upgradeCoversBtn.disabled = job.running;
+    upgradeCoversBtn.textContent = job.running ? '⏳' : '🖼️';
+    cancelCoversBtn.classList.toggle('hidden', !job.running);
+
+    if (job.running) return;
+
+    const notes = [];
+    if (job.error) notes.push(`Error: ${job.error}`);
+    if (job.dry_run) notes.push('Simulation — nothing was written.');
+    for (const [source, count] of Object.entries(job.source_errors || {})) {
+      notes.push(`${source} was unreachable on ${count} book(s).`);
+    }
+    upgradeCoversStatus.textContent = notes.join(' ');
+  }
+
+  async function pollCoverJob() {
+    try {
+      const res = await fetch('/api/covers/upgrade');
+      const job = await res.json();
+      renderCoverJob(job);
+      if (!job.running && coverPollTimer) {
+        clearInterval(coverPollTimer);
+        coverPollTimer = null;
+      }
+    } catch {
+      // Perte de réseau passagère : le prochain tick réessaiera.
+    }
+  }
+
+  function watchCoverJob() {
+    if (coverPollTimer) return;
+    coverPollTimer = setInterval(pollCoverJob, 1000);
+  }
+
+  upgradeCoversBtn.addEventListener('click', async () => {
+    upgradeCoversBtn.disabled = true;
+    upgradeCoversStatus.textContent = '';
+    coverProgressLog.innerHTML = '';
+    try {
+      const res = await fetch('/api/covers/upgrade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          min_width: Number(coverMinWidth.value) || 400,
+          dry_run: coverDryRun.checked,
+        }),
+      });
+      const job = await res.json();
+      if (!res.ok) throw new Error(job.error || 'Could not start the upgrade.');
+      renderCoverJob(job);
+      watchCoverJob();
+    } catch (e) {
+      upgradeCoversStatus.textContent = `Error: ${e.message}`;
+      upgradeCoversBtn.disabled = false;
+    }
+  });
+
+  cancelCoversBtn.addEventListener('click', async () => {
+    cancelCoversBtn.disabled = true;
+    try {
+      await fetch('/api/covers/upgrade/cancel', { method: 'POST' });
+    } finally {
+      cancelCoversBtn.disabled = false;
+    }
+  });
+
+  // Un travail lancé avant un rechargement de page continue côté serveur : on
+  // se raccroche à son état au chargement.
+  async function resumeCoverJob() {
+    const res = await fetch('/api/covers/upgrade');
+    const job = await res.json();
+    renderCoverJob(job);
+    if (job.running) watchCoverJob();
+  }
+
   exportBtn.addEventListener('click', async () => {
     const originalText = exportBtn.textContent;
     exportBtn.disabled = true;
@@ -163,4 +326,5 @@
   loadLibraries();
   loadGenres();
   loadDuplicates();
+  resumeCoverJob();
 })();

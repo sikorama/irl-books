@@ -7,6 +7,7 @@
 // Usage: node fetch-covers.js [--delay-ms 250] [--limit N]
 
 const { openDb } = require('./lib/db.js');
+const { fetchCoverImage, isbnVariants } = require('./lib/lookup.js');
 
 function parseArgs() {
   const args = { delayMs: 250, limit: Infinity };
@@ -22,13 +23,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Returns { buf, mime } or null. Both ISBN forms are tried: some records are
+// only indexed under one of them.
 async function fetchCover(isbn) {
-  const url = `https://covers.openlibrary.org/b/isbn/${encodeURIComponent(isbn)}-L.jpg?default=false`;
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length < 100) return null; // guards against tiny placeholder responses
-  return buf;
+  for (const variant of isbnVariants(String(isbn).replace(/[^0-9Xx]/g, '').toUpperCase())) {
+    const image = await fetchCoverImage(
+      `https://covers.openlibrary.org/b/isbn/${encodeURIComponent(variant)}-L.jpg?default=false`,
+    );
+    if (image) return image;
+  }
+  return null;
 }
 
 async function main() {
@@ -53,7 +57,7 @@ async function main() {
     try {
       const cover = await fetchCover(row.isbn);
       if (cover) {
-        updateStmt.run(cover, 'image/jpeg', row.id);
+        updateStmt.run(cover.buf, cover.mime, row.id);
         found++;
         console.log(`OK    #${row.id} ${row.isbn} — ${row.title}`);
       } else {

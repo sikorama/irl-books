@@ -8,6 +8,8 @@ const path = require('path');
 const { openDb } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
 const { GENRES, guessGenre } = require('./lib/categorize.js');
+const { lookupIsbn, imageSearch, hasGoogleBooksKey } = require('./lib/lookup.js');
+const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
 
 // Usage: node server.js [--http]
 function parseArgs() {
@@ -246,103 +248,63 @@ function exportCalibre() {
   return { count, path: EXPORT_DIR };
 }
 
-async function fetchCoverBase64(url) {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 100) return null;
-    return `data:image/jpeg;base64,${buf.toString('base64')}`;
-  } catch {
-    return null;
-  }
-}
+// Le ré-upgrade des couvertures dure plusieurs minutes : il tourne en tâche de
+// fond et la page interroge son état. Un seul travail à la fois, gardé en
+// mémoire après la fin pour que le résultat survive à un rechargement de page.
+const COVER_JOB_LOG_MAX = 60;
+let coverJob = null;
 
-async function lookupIsbnOpenLibrary(cleanIsbn) {
-  const res = await fetch(
-    `https://openlibrary.org/api/books?bibkeys=ISBN:${encodeURIComponent(cleanIsbn)}&format=json&jscmd=data`,
-  );
-  if (!res.ok) return null;
-  const data = await res.json();
-  const entry = data[`ISBN:${cleanIsbn}`];
-  if (!entry) return null;
-
-  const yearMatch = /\d{4}/.exec(entry.publish_date || '');
-  const coverBase64 = entry.cover && entry.cover.large ? await fetchCoverBase64(entry.cover.large) : null;
-
-  return {
-    title: [entry.title, entry.subtitle].filter(Boolean).join(' : '),
-    authors: (entry.authors || []).map((a) => a.name),
-    publisher: (entry.publishers || []).map((p) => p.name).join(', ') || null,
-    publishing_year: yearMatch ? Number(yearMatch[0]) : null,
-    cover_base64: coverBase64,
+function startCoverUpgrade({ minWidth, dryRun }) {
+  const job = {
+    running: true,
+    cancelled: false,
+    min_width: minWidth,
+    dry_run: dryRun,
+    total: null,
+    processed: 0,
+    upgraded: 0,
+    unchanged: 0,
+    failed: 0,
+    current: null,
+    log: [],
+    source_errors: {},
+    error: null,
+    finished: false,
   };
-}
+  coverJob = job;
 
-async function lookupIsbnGoogleBooks(cleanIsbn) {
-  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(cleanIsbn)}`);
-  if (!res.ok) return null;
-  const data = await res.json();
-  const item = Array.isArray(data.items) ? data.items[0] : null;
-  if (!item) return null;
-  const info = item.volumeInfo || {};
-
-  const thumb = info.imageLinks && (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail);
-  const coverBase64 = thumb ? await fetchCoverBase64(thumb.replace(/^http:/, 'https:')) : null;
-  const yearMatch = /\d{4}/.exec(info.publishedDate || '');
-
-  return {
-    title: info.title || null,
-    authors: info.authors || [],
-    publisher: info.publisher || null,
-    publishing_year: yearMatch ? Number(yearMatch[0]) : null,
-    cover_base64: coverBase64,
-  };
-}
-
-async function lookupIsbn(isbn) {
-  const cleanIsbn = String(isbn).replace(/[^0-9Xx]/g, '');
-  if (!cleanIsbn) return { found: false };
-
-  // Open Library is tried first (better metadata quality); Google Books is a
-  // fallback for editions/ISBNs it doesn't have.
-  const result = (await lookupIsbnOpenLibrary(cleanIsbn)) || (await lookupIsbnGoogleBooks(cleanIsbn));
-  if (!result) return { found: false };
-  return { found: true, ...result };
-}
-
-async function imageSearch(query) {
-  const q = String(query || '').trim();
-  if (!q) return [];
-
-  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=20&printType=books`);
-  if (!res.ok) throw new Error(`Google Books API returned ${res.status}`);
-  const data = await res.json();
-  const items = Array.isArray(data.items) ? data.items : [];
-
-  const results = [];
-  for (const item of items) {
-    if (results.length >= 5) break;
-    const info = item.volumeInfo || {};
-    const links = info.imageLinks;
-    const thumb = links && (links.thumbnail || links.smallThumbnail);
-    if (!thumb) continue;
-    const imgUrl = thumb.replace(/^http:/, 'https:').replace('zoom=1', 'zoom=2');
-    try {
-      const imgRes = await fetch(imgUrl);
-      if (!imgRes.ok) continue;
-      const buf = Buffer.from(await imgRes.arrayBuffer());
-      if (buf.length < 100) continue;
-      results.push({
-        title: info.title || null,
-        authors: info.authors || [],
-        cover_base64: `data:image/jpeg;base64,${buf.toString('base64')}`,
+  upgradeCovers(db, {
+    minWidth,
+    dryRun,
+    onStart: (total) => { job.total = total; },
+    onProgress: (event, totals) => {
+      job.processed = totals.processed;
+      job.upgraded = totals.upgraded;
+      job.unchanged = totals.unchanged;
+      job.failed = totals.failed;
+      job.current = { id: event.id, title: event.title };
+      if (event.status === 'unchanged') return;
+      job.log.push({
+        id: event.id,
+        title: event.title,
+        width: event.width,
+        new_width: event.new_width,
+        status: event.status,
+        error: event.error || null,
       });
-    } catch {
-      // Skip images that fail to download; the rest of the search still stands.
-    }
-  }
-  return results;
+      if (job.log.length > COVER_JOB_LOG_MAX) job.log.shift();
+    },
+    shouldStop: () => job.cancelled,
+  })
+    .then((result) => { job.source_errors = result.source_errors; })
+    .catch((e) => { job.error = e.message; })
+    .finally(() => {
+      job.running = false;
+      job.current = null;
+      job.finished = true;
+    });
+
+  return job;
 }
 
 function serveStatic(req, res, urlPath) {
@@ -426,9 +388,36 @@ async function handleApi(req, res, url) {
     }
   }
 
+  if (parts.length >= 3 && parts[1] === 'covers' && parts[2] === 'upgrade') {
+    if (req.method === 'GET' && parts.length === 3) {
+      return sendJson(res, 200, coverJob || { running: false, finished: false });
+    }
+    if (req.method === 'POST' && parts.length === 4 && parts[3] === 'cancel') {
+      if (!coverJob || !coverJob.running) return sendJson(res, 409, { error: 'No upgrade in progress.' });
+      coverJob.cancelled = true;
+      return sendJson(res, 200, coverJob);
+    }
+    if (req.method === 'POST' && parts.length === 3) {
+      if (coverJob && coverJob.running) {
+        return sendJson(res, 409, { error: 'An upgrade is already running.' });
+      }
+      let payload = {};
+      try {
+        const raw = await readBody(req);
+        if (raw.length) payload = JSON.parse(raw.toString('utf8'));
+      } catch (e) {
+        return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+      }
+      const minWidth = Number.isFinite(Number(payload.min_width))
+        ? Math.min(Math.max(Math.trunc(Number(payload.min_width)), 50), 4000)
+        : DEFAULT_MIN_WIDTH;
+      return sendJson(res, 202, startCoverUpgrade({ minWidth, dryRun: !!payload.dry_run }));
+    }
+  }
+
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'image-search') {
     try {
-      const results = await imageSearch(url.searchParams.get('q'));
+      const results = await imageSearch(url.searchParams.get('q'), url.searchParams.get('isbn'));
       return sendJson(res, 200, { results });
     } catch (e) {
       return sendJson(res, 502, { results: [], error: `Search failed: ${e.message}` });
@@ -725,5 +714,8 @@ server.listen(PORT, () => {
       console.log('(HTTPS disabled: run `node gen-cert.js` then restart the server to enable it.)');
     }
     console.log('WARNING: running over plain HTTP — camera barcode scanning will not work on phones/other devices (only `localhost` is exempt from the secure-context requirement).');
+  }
+  if (!hasGoogleBooksKey()) {
+    console.log('NOTE: GOOGLE_BOOKS_KEY is not set — keyless Google Books requests share an anonymous daily quota that is usually already exhausted (HTTP 429). ISBN lookups still work via the BnF and Open Library; cover search by title needs the key. See README.');
   }
 });

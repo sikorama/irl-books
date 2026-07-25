@@ -16,6 +16,16 @@
 
 <main class="settings-main">
   <section class="settings-section">
+    <h2>Current room</h2>
+    <p class="section-intro">Pre-fills the room on every new book, so a scanning session doesn't need it typed each time. Pick an existing room or name a new one. Filing a book in a different room makes that one current instead. This is remembered per device.</p>
+    <div class="isbn-row current-room-row">
+      <select id="current-room-select"><option value="">Choose a room…</option></select>
+      <input type="text" id="current-room-input" placeholder="New room">
+    </div>
+    <p id="current-room-status" class="export-status"></p>
+  </section>
+
+  <section class="settings-section">
     <h2>Rooms</h2>
     <p class="section-intro">Renaming a room updates every book in it.</p>
     <div id="libraries-list" class="libraries-list"></div>
@@ -36,6 +46,27 @@
     <h2>Duplicates</h2>
     <p class="section-intro">Books sharing the same ISBN (or import identifier). Groups in red have different titles: it's almost always an ISBN error in the source data, not a real duplicate.</p>
     <div id="duplicates-list"></div>
+  </section>
+
+  <section class="settings-section">
+    <h2>Cover quality</h2>
+    <p class="section-intro">Most covers imported before the fix are 128px-wide thumbnails. This re-asks Open Library and Google Books for a bigger version of every cover narrower than the threshold, and only replaces one when a clearly wider image comes back. Books without an ISBN are skipped. It takes a few minutes — you can leave the page, the job keeps running.</p>
+    <div class="checkbox-row cover-upgrade-row">
+      <label>Upgrade covers narrower than
+        <input type="number" id="cover-min-width" value="400" min="50" max="4000" step="50"> px
+      </label>
+      <label><input type="checkbox" id="cover-dry-run"> Simulate (report only, write nothing)</label>
+    </div>
+    <div class="button-row">
+      <button id="upgrade-covers-btn" class="primary icon-btn" title="Upgrade covers">🖼️</button>
+      <button id="cancel-covers-btn" class="secondary icon-btn hidden" title="Stop">✋</button>
+    </div>
+    <div id="cover-progress" class="cover-progress hidden">
+      <div class="progress-track"><div class="progress-fill" id="cover-progress-fill"></div></div>
+      <p class="progress-text" id="cover-progress-text"></p>
+      <ul class="progress-log" id="cover-progress-log"></ul>
+    </div>
+    <p id="upgrade-covers-status" class="export-status"></p>
   </section>
 
   <section class="settings-section">

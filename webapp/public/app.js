@@ -534,14 +534,17 @@
     imageSearchBtn.addEventListener('click', async () => {
       const titleVal = detailContent.querySelector('[data-field="title"]').value;
       const authorsVal = detailContent.querySelector('[data-field="authors"]').value;
+      const isbnVal = detailContent.querySelector('[data-field="isbn"]').value.trim();
       const query = [titleVal, authorsVal].filter(Boolean).join(' ');
-      if (!query.trim()) return;
+      if (!query.trim() && !isbnVal) return;
 
       imageSearchBtn.disabled = true;
       imageSearchResults.classList.remove('hidden');
       imageSearchResults.innerHTML = '<p class="image-search-status">Searching…</p>';
       try {
-        const res = await fetch(`/api/image-search?q=${encodeURIComponent(query)}`);
+        const params = new URLSearchParams({ q: query });
+        if (isbnVal) params.set('isbn', isbnVal);
+        const res = await fetch(`/api/image-search?${params}`);
         const data = await res.json();
         if (!data.results || !data.results.length) {
           imageSearchResults.innerHTML = '<p class="image-search-status">No results found.</p>';
