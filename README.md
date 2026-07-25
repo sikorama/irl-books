@@ -156,11 +156,25 @@ node net-check.js                                   # locally
 docker compose exec <service> node irl-books/net-check.js
 ```
 
-It prints, per source, the resolved IP addresses, the HTTP status and the exact
-network error, then explains how to read the failures. `fetch failed` on its own
-is undici's generic wrapper; the real reason (`ENOTFOUND`, `ECONNRESET`,
-`ECONNREFUSED`, a TLS error…) lives in its `cause`, which the app now surfaces
-everywhere instead of swallowing.
+It prints, per source: the resolved IP addresses **and how long resolving took**,
+the HTTP status, the response body when it isn't a 2xx, and — for any host that
+errors — a second attempt without the app's `User-Agent`, to tell a rejected
+header apart from a broken service. A summary line flags the resolver when it is
+slow enough to dominate every request.
+
+`fetch failed` on its own is undici's generic wrapper; the real reason
+(`ENOTFOUND`, `ECONNRESET`, `ECONNREFUSED`, a TLS error…) lives in its `cause`,
+which the app now surfaces everywhere instead of swallowing.
+
+A uniform multi-second floor across unrelated hosts is a resolver problem, not a
+network one. Under Docker, pointing the service at a fast resolver usually fixes
+it outright:
+
+```yaml
+services:
+  irl-books:
+    dns: [1.1.1.1, 9.9.9.9]
+```
 
 ## Maintenance scripts
 

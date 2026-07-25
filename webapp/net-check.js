@@ -33,35 +33,55 @@ function describeError(e) {
 }
 
 async function resolve(hostname) {
+  const startedAt = Date.now();
   try {
     const addresses = await dns.lookup(hostname, { all: true });
-    return addresses.map((a) => a.address).join(', ');
+    return { ms: Date.now() - startedAt, text: addresses.map((a) => a.address).join(', ') };
   } catch (e) {
-    return `DNS FAILED: ${e.code || e.message}`;
+    return { ms: Date.now() - startedAt, text: `DNS FAILED: ${e.code || e.message}`, failed: true };
+  }
+}
+
+// A non-2xx body is the single most informative thing here and it was being
+// thrown away: a Google API error names its own cause in JSON, whereas an
+// intercepting proxy returns HTML.
+async function request(url, headers) {
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const body = await res.text();
+    return {
+      ms: Date.now() - startedAt,
+      status: res.status,
+      ok: res.ok,
+      text: `HTTP ${res.status} (${Buffer.byteLength(body)} bytes)`,
+      body: res.ok ? null : body.replace(/\s+/g, ' ').trim().slice(0, 220),
+    };
+  } catch (e) {
+    return { ms: Date.now() - startedAt, ok: false, text: `FAILED: ${describeError(e)}`, body: null };
   }
 }
 
 async function probe(label, url) {
   const { hostname } = new URL(url);
-  const addresses = await resolve(hostname);
-  const startedAt = Date.now();
-  let outcome;
-  try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    const body = await res.arrayBuffer();
-    outcome = `HTTP ${res.status} (${body.byteLength} bytes)`;
-  } catch (e) {
-    outcome = `FAILED: ${describeError(e)}`;
-  }
-  const ms = `${Date.now() - startedAt}ms`;
+  const lookup = await resolve(hostname);
+  const result = await request(url, { 'User-Agent': USER_AGENT });
+
   console.log(`${label}`);
-  console.log(`   ${hostname} -> ${addresses}`);
-  console.log(`   ${outcome} in ${ms}`);
+  console.log(`   ${hostname} -> ${lookup.text}   [DNS ${lookup.ms}ms]`);
+  console.log(`   ${result.text} in ${result.ms}ms`);
+  if (result.body) console.log(`   body: ${result.body}`);
+
+  // Same request, default User-Agent. Google's frontend has been the odd one
+  // out here, and a manual `node -e fetch(...)` (which sends no custom header)
+  // succeeded where the app failed — worth isolating rather than guessing.
+  if (!result.ok) {
+    const bare = await request(url, {});
+    console.log(`   retry without our User-Agent: ${bare.text} in ${bare.ms}ms`);
+    if (bare.ok) console.log('   >>> the custom User-Agent is what this host rejects.');
+  }
   console.log('');
-  return !outcome.startsWith('FAILED') && !outcome.startsWith('HTTP 5');
+  return { ok: result.ok, dnsMs: lookup.ms, dnsFailed: Boolean(lookup.failed) };
 }
 
 async function main() {
@@ -71,8 +91,23 @@ async function main() {
   for (const [label, url] of TARGETS) {
     results.push([label, await probe(label, url)]);
   }
-  const bad = results.filter(([, ok]) => !ok);
+
+  // A uniform floor across unrelated hosts is never the network; it is the
+  // resolver timing out and retrying, and it taxes every single request the
+  // app makes.
+  const dnsTimes = results.map(([, r]) => r.dnsMs).sort((a, b) => a - b);
+  const medianDns = dnsTimes[Math.floor(dnsTimes.length / 2)];
+  const dnsFailures = results.filter(([, r]) => r.dnsFailed).length;
   console.log('---');
+  console.log(`DNS: median ${medianDns}ms, slowest ${dnsTimes[dnsTimes.length - 1]}ms, ${dnsFailures} outright failure(s)`);
+  if (medianDns > 500 || dnsFailures) {
+    console.log('  ^ This is slow enough to dominate every request. Point the container at a');
+    console.log('    fast resolver (`dns: [1.1.1.1, 9.9.9.9]` on the compose service), or find out');
+    console.log('    why the current one takes seconds to answer.');
+  }
+  console.log('');
+
+  const bad = results.filter(([, r]) => !r.ok);
   if (!bad.length) {
     console.log('Every source is reachable from here.');
     return;
