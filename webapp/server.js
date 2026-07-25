@@ -8,7 +8,7 @@ const path = require('path');
 const { openDb } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
 const { GENRES, guessGenre } = require('./lib/categorize.js');
-const { lookupIsbn, imageSearch, hasGoogleBooksKey } = require('./lib/lookup.js');
+const { lookupIsbn, imageSearch, hasGoogleBooksKey, describeGoogleBooksKey } = require('./lib/lookup.js');
 const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
 
 // Usage: node server.js [--http]
@@ -726,7 +726,8 @@ server.listen(PORT, () => {
     }
     console.log('WARNING: running over plain HTTP — camera barcode scanning will not work on phones/other devices (only `localhost` is exempt from the secure-context requirement).');
   }
+  console.log(`Google Books: ${describeGoogleBooksKey()}`);
   if (!hasGoogleBooksKey()) {
-    console.log('NOTE: GOOGLE_BOOKS_KEY is not set — keyless Google Books requests share an anonymous daily quota that is usually already exhausted (HTTP 429). ISBN lookups still work via the BnF and Open Library; cover search by title needs the key. See README.');
+    console.log('  (keyless requests share an anonymous daily quota that is usually already exhausted — HTTP 429. ISBN lookups still work via the BnF and Open Library; cover search by title is degraded. See README.)');
   }
 });

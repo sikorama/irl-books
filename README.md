@@ -61,6 +61,29 @@ GOOGLE_BOOKS_KEY=AIza... node server.js
 docker run -e GOOGLE_BOOKS_KEY=AIza... ...   # same variable under Docker
 ```
 
+```yaml
+# docker-compose.yml
+services:
+  irl-books:
+    environment:
+      GOOGLE_BOOKS_KEY: "AIza..."
+```
+
+On startup the server prints which it is using, so you can check the variable
+actually reached the process (the key itself is never logged):
+
+```
+Google Books: key loaded (…9f3a), country=FR
+Google Books: NO KEY (GOOGLE_BOOKS_KEY unset), country=FR
+```
+
+#### `GOOGLE_BOOKS_COUNTRY` (defaults to `FR`)
+
+Google Books geolocates the caller's IP to decide which editions it may show.
+When it can't — common from a container, a VPN or a hosting provider — it
+answers **`503 backendError`** instead of saying so. Every request therefore
+carries an explicit `country`. Change it if your collection isn't French.
+
 ### HTTPS (required for barcode scanning from a phone)
 
 The site runs over HTTP by default, reachable on the local network at the

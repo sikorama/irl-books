@@ -25,6 +25,13 @@ const COVER_TIMEOUT_MS = 12000;
 // s'obtient sur https://console.cloud.google.com → API « Books API ».
 const GOOGLE_BOOKS_KEY = process.env.GOOGLE_BOOKS_KEY || '';
 
+// Google Books géolocalise l'IP appelante pour décider quelles éditions il a le
+// droit de montrer. Quand il n'y arrive pas — ce qui est courant depuis un
+// conteneur, un VPN ou un hébergeur — il répond « 503 backendError » au lieu
+// d'une erreur explicite. Envoyer le pays systématiquement supprime le
+// problème.
+const GOOGLE_BOOKS_COUNTRY = process.env.GOOGLE_BOOKS_COUNTRY || 'FR';
+
 async function httpGet(url, { timeout = TIMEOUT_MS, accept, retries = 1 } = {}) {
   const headers = { 'User-Agent': USER_AGENT };
   if (accept) headers.Accept = accept;
@@ -152,6 +159,7 @@ function openLibraryCoverUrl(isbn, size = 'L') {
 function googleBooksUrl(params) {
   const url = new URL('https://www.googleapis.com/books/v1/volumes');
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  if (GOOGLE_BOOKS_COUNTRY) url.searchParams.set('country', GOOGLE_BOOKS_COUNTRY);
   if (GOOGLE_BOOKS_KEY) url.searchParams.set('key', GOOGLE_BOOKS_KEY);
   return url;
 }
@@ -362,7 +370,12 @@ async function openLibraryTitleCandidates(title, authors, limit) {
   if (authors) params.set('author', authors);
   if (!params.has('title') && !params.has('author')) return [];
 
-  const res = await httpGet(`https://openlibrary.org/search.json?${params}`, { accept: 'application/json' });
+  // `search.json` est nettement plus lent que le reste d'Open Library (3 à 15 s
+  // mesurées) : le délai commun de 8 s le coupait avant qu'il ait répondu.
+  const res = await httpGet(`https://openlibrary.org/search.json?${params}`, {
+    accept: 'application/json',
+    timeout: 20000,
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
 
@@ -475,4 +488,9 @@ module.exports = {
   isbnVariants,
   googleBooksPaused,
   hasGoogleBooksKey: () => Boolean(GOOGLE_BOOKS_KEY),
+  // De quoi vérifier au démarrage que la clé a bien traversé docker compose,
+  // sans l'écrire en clair dans les logs.
+  describeGoogleBooksKey: () => (GOOGLE_BOOKS_KEY
+    ? `key loaded (…${GOOGLE_BOOKS_KEY.slice(-4)}), country=${GOOGLE_BOOKS_COUNTRY}`
+    : `NO KEY (GOOGLE_BOOKS_KEY unset), country=${GOOGLE_BOOKS_COUNTRY}`),
 };
