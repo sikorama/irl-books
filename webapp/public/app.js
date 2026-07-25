@@ -37,6 +37,7 @@
   const duplicateOverlay = document.getElementById('duplicate-overlay');
   const duplicateTitle = document.getElementById('duplicate-title');
   const duplicateRoomNote = document.getElementById('duplicate-room-note');
+  const duplicateCover = document.getElementById('duplicate-cover');
   const duplicateMoveBtn = document.getElementById('duplicate-move-btn');
   const duplicateOpenBtn = document.getElementById('duplicate-open-btn');
   const duplicateIgnoreBtn = document.getElementById('duplicate-ignore-btn');
@@ -905,10 +906,12 @@
 
   // Les boutons du doublon portent une icône et un libellé séparés (tuiles
   // carrées sur mobile) : écrire dans le bouton lui-même effacerait l'icône.
-  function setActionButton(btn, icon, label) {
+  // Le libellé doit rester court pour la tuile : `title` porte la formulation
+  // complète quand elle apporte quelque chose.
+  function setActionButton(btn, icon, label, title = label) {
     if (icon) btn.querySelector('.dup-action-icon').textContent = icon;
     btn.querySelector('.dup-action-label').textContent = label;
-    btn.title = label;
+    btn.title = title;
   }
 
   function handleExistingBook(existing) {
@@ -917,21 +920,27 @@
     duplicateWasScanning = addFormScannerUsed;
 
     duplicateTitle.textContent = existing.title;
+    // Voir la couverture déjà en base est le moyen le plus rapide de trancher :
+    // c'est bien ce livre-là (donc doublon) ou une autre édition.
+    duplicateCover.src = coverUrl(existing);
+    duplicateCover.alt = existing.title || '';
     if (currentRoom && (existing.library || '') !== currentRoom) {
       // Les deux pièces vont dans la note : le libellé du bouton reste court,
       // sinon un nom de pièce à rallonge déborde de la tuile carrée.
       duplicateRoomNote.textContent = `Currently in "${existing.library || 'Unknown room'}" — you are filing into "${currentRoom}".`;
-      setActionButton(duplicateMoveBtn, '📦', 'Move it here');
+      setActionButton(duplicateMoveBtn, '📦', 'Move here', `Move to "${currentRoom}"`);
       duplicateMoveBtn.dataset.target = currentRoom;
       duplicateMoveBtn.classList.remove('hidden');
     } else {
       duplicateRoomNote.textContent = '';
       duplicateMoveBtn.classList.add('hidden');
     }
+    // Libellés courts pour tenir dans une tuile ; la phrase complète reste en
+    // infobulle (voir setActionButton).
     if (duplicateWasScanning) {
-      setActionButton(duplicateIgnoreBtn, '📷', 'Ignore, scan another');
+      setActionButton(duplicateIgnoreBtn, '📷', 'Scan another', 'Ignore this duplicate and scan another book');
     } else {
-      setActionButton(duplicateIgnoreBtn, '✖', 'Ignore, new entry');
+      setActionButton(duplicateIgnoreBtn, '✖', 'New entry', 'Ignore, add it as a new entry anyway');
     }
 
     addOverlay.classList.add('hidden');

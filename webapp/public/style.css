@@ -243,7 +243,18 @@ main { padding: 1.5rem; }
 }
 .quick-pick-status { font-size: 0.8rem; color: var(--text-dim); margin: 0.6rem 0 0; min-height: 1.1em; }
 
-.duplicate-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem; }
+.duplicate-decision { display: flex; align-items: flex-start; gap: 0.8rem; margin-top: 1rem; }
+.duplicate-cover {
+  width: 84px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  display: block;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  background: var(--border);
+}
+.duplicate-actions { display: flex; flex-direction: column; gap: 0.5rem; flex: 1; min-width: 0; }
 .duplicate-actions button {
   width: 100%;
   display: inline-flex;
@@ -258,6 +269,9 @@ main { padding: 1.5rem; }
    Les tuiles carrées se répartissent l'espace, que le bouton « déplacer »
    soit affiché ou non. */
 @media (max-width: 600px) {
+  /* La couverture cède de la largeur pour que les trois tuiles restent
+     confortables au pouce. */
+  .duplicate-cover { width: 56px; }
   .duplicate-actions {
     flex-direction: row;
     gap: 0.6rem;
@@ -265,8 +279,14 @@ main { padding: 1.5rem; }
   .duplicate-actions button {
     flex: 1 1 0;
     width: auto;
-    aspect-ratio: 1;
-    min-height: 5.5rem;
+    /* `min-width: 0` est indispensable : sans lui la largeur plancher des
+       tuiles fait déborder la troisième hors de la modale.
+       Pas d'`aspect-ratio` ici : il fige la hauteur sur la largeur, et un
+       libellé sur trois lignes débordait de la tuile sur les écrans étroits.
+       Le plancher de hauteur donne la même allure carrée, en laissant la
+       tuile grandir si le texte le demande. */
+    min-width: 0;
+    min-height: 5rem;
     flex-direction: column;
     gap: 0.4rem;
     padding: 0.6rem 0.4rem;
