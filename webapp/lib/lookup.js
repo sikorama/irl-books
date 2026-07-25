@@ -21,7 +21,11 @@ const { searchImages } = require('./ddg-images.js');
 const CATALOG_RESULTS = 5;
 const WEB_RESULTS = 5;
 
-const USER_AGENT = 'IRL-Books/1.0 (catalogue de bibliothèque personnelle)';
+// Strictement ASCII. Une valeur d'en-tête HTTP ne peut pas contenir autre chose
+// (RFC 9110) : undici transmet l'octet accentué tel quel, et les frontaux
+// stricts comme celui de Google rejettent la requête — ce qui remontait ici
+// sous forme de « 503 » incompréhensible.
+const USER_AGENT = 'IRL-Books/1.0 (personal library catalog)';
 const TIMEOUT_MS = 8000;
 const COVER_TIMEOUT_MS = 12000;
 
@@ -403,114 +407,87 @@ async function openLibraryTitleCandidates(title, authors, limit) {
   return candidates;
 }
 
-// Recherche par titre/auteur sur les deux catalogues. Google Books était
-// jusqu'ici la seule source : dès qu'il tombait (429/503), la fonctionnalité
-// entière ne rendait plus rien.
-async function coverSearchByTitle(title, authors, limit, report) {
-  const query = [title, authors].filter(Boolean).join(' ').trim();
-  const collect = async (name, fn) => {
-    try {
-      const candidates = await fn();
-      report.ok++;
-      return candidates;
-    } catch (e) {
-      report.errors.push(`${name}: ${e.message}`);
-      return [];
-    }
+// Diffuse les couvertures au fil de l'eau plutôt que de rendre un lot final.
+//
+// Toutes les sources partent ensemble et chacune émet dès qu'elle a terminé :
+// une vignette apparaît en une seconde ou deux au lieu d'attendre la plus lente.
+// Auparavant les recherches par ISBN étaient séquentielles et bloquaient les
+// autres, ce qui pouvait faire patienter une minute devant un écran figé.
+//
+// `emit` reçoit des objets { type: 'start' | 'result' | 'source' | 'done' }.
+async function imageSearchStream({ title, authors, isbn }, emit) {
+  const cleanTitle = String(title || '').trim();
+  const cleanAuthors = String(authors || '').trim();
+  const clean = cleanIsbn(isbn);
+  const hasText = Boolean(cleanTitle || cleanAuthors);
+
+  // Deux sources ramènent parfois la même image (la couverture Open Library
+  // d'un ISBN et celle trouvée par son titre) : inutile de la proposer deux fois.
+  const seen = new Set();
+  const push = (result) => {
+    if (!result.cover_base64 || seen.has(result.cover_base64)) return;
+    seen.add(result.cover_base64);
+    emit({ type: 'result', result });
   };
 
-  const [google, openLibrary] = await Promise.all([
-    query ? collect('Google Books', () => googleTitleCandidates(query, limit + 3)) : [],
-    collect('Open Library', () => openLibraryTitleCandidates(title, authors, limit + 3)),
-  ]);
-
-  // On alterne les deux sources pour qu'aucune ne monopolise la grille.
-  const ordered = [];
-  for (let i = 0; i < Math.max(google.length, openLibrary.length); i++) {
-    if (google[i]) ordered.push(google[i]);
-    if (openLibrary[i]) ordered.push(openLibrary[i]);
-  }
-
-  const covers = await Promise.all(ordered.map((c) => fetchCover(c.cover)));
-  return ordered
-    .map((c, i) => ({ title: c.title, authors: c.authors, source: 'catalog', cover_base64: covers[i] }))
-    .filter((r) => r.cover_base64)
-    .slice(0, limit);
-}
-
-// Recherche web, proposée en complément parce que les catalogues sont
-// régulièrement indisponibles et ignorent purement et simplement une partie du
-// fonds. Les images ne sont pas rattachées à une édition précise : c'est à
-// l'utilisateur de trancher visuellement, d'où l'étiquette de provenance.
-async function webCoverCandidates(title, authors, limit, report) {
-  const query = [title, authors, 'livre couverture'].filter(Boolean).join(' ').trim();
-  let candidates = [];
-  try {
-    candidates = await searchImages(query, limit + 3);
-    report.ok++;
-  } catch (e) {
-    report.errors.push(`Recherche web: ${e.message}`);
-    return [];
-  }
-
-  const covers = await Promise.all(candidates.map((c) => fetchCover(c.cover)));
-  return candidates
-    .map((c, i) => ({ title: c.title, authors: [], source: c.source, cover_base64: covers[i] }))
-    .filter((r) => r.cover_base64)
-    .slice(0, limit);
-}
-
-// Renvoie { results, errors, ok } où `ok` compte les sources qui ont
-// effectivement répondu. Une source qui répond « rien » est un résultat
-// légitime ; une source qui tombe ne l'est pas, et rien ne distinguait les deux
-// côté utilisateur jusqu'ici.
-async function imageSearch({ title, authors, isbn }) {
-  const results = [];
-  const report = { errors: [], ok: 0 };
-  const { errors } = report;
+  // On collecte les tâches avant d'en lancer une seule, pour pouvoir annoncer
+  // leur nombre au client avant que le premier résultat n'arrive.
+  const jobs = [];
+  const run = (name, fn) => jobs.push({ name, fn });
 
   // Une couverture indexée par ISBN correspond bien plus souvent à l'édition
   // exacte qu'une recherche titre/auteur en texte libre — les éditions
   // Gallimard/Folio, par exemple, n'ont souvent pas d'`imageLinks` chez Google
   // alors qu'Open Library a bien une image pour ce même ISBN.
-  const clean = cleanIsbn(isbn);
   if (clean) {
-    const olCover = await fetchCoverBase64(openLibraryCoverUrl(clean));
-    if (olCover) results.push({ title: 'Open Library', authors: [], source: 'catalog', cover_base64: olCover });
-
-    try {
+    run('Open Library (ISBN)', async () => {
+      const cover = await fetchCoverBase64(openLibraryCoverUrl(clean));
+      push({ title: 'Open Library', authors: [], source: 'Open Library', group: 'catalog', cover_base64: cover });
+    });
+    run('Google Books (ISBN)', async () => {
       const gb = await lookupIsbnGoogleBooks(clean);
-      report.ok++;
-      if (gb && gb.cover) {
-        const cover = await fetchCover(gb.cover);
-        if (cover) results.push({ title: gb.title, authors: gb.authors, source: 'catalog', cover_base64: cover });
-      }
-    } catch (e) {
-      errors.push(`Google Books (ISBN): ${e.message}`);
-    }
+      if (!gb || !gb.cover) return;
+      push({
+        title: gb.title, authors: gb.authors, source: 'Google Books', group: 'catalog', cover_base64: await fetchCover(gb.cover),
+      });
+    });
   }
 
-  const cleanTitle = String(title || '').trim();
-  const cleanAuthors = String(authors || '').trim();
+  if (hasText) {
+    const query = [cleanTitle, cleanAuthors].filter(Boolean).join(' ');
+    run('Google Books', async () => {
+      const candidates = await googleTitleCandidates(query, CATALOG_RESULTS);
+      const covers = await Promise.all(candidates.map((c) => fetchCover(c.cover)));
+      candidates.forEach((c, i) => push({
+        title: c.title, authors: c.authors, source: 'Google Books', group: 'catalog', cover_base64: covers[i],
+      }));
+    });
+    run('Open Library', async () => {
+      const candidates = await openLibraryTitleCandidates(cleanTitle, cleanAuthors, CATALOG_RESULTS);
+      const covers = await Promise.all(candidates.map((c) => fetchCover(c.cover)));
+      candidates.forEach((c, i) => push({
+        title: c.title, authors: c.authors, source: 'Open Library', group: 'catalog', cover_base64: covers[i],
+      }));
+    });
+    run('Web', async () => {
+      const candidates = await searchImages([cleanTitle, cleanAuthors, 'livre couverture'].filter(Boolean).join(' '), WEB_RESULTS);
+      const covers = await Promise.all(candidates.map((c) => fetchCover(c.cover)));
+      candidates.forEach((c, i) => push({
+        title: c.title, authors: [], source: c.source, group: 'web', cover_base64: covers[i],
+      }));
+    });
+  }
 
-  // Catalogues et recherche web en parallèle : attendre les premiers pour
-  // décider s'il faut lancer la seconde doublerait le temps d'attente les jours
-  // où les catalogues sont en panne, c'est-à-dire précisément quand on a besoin
-  // du repli.
-  const [catalog, web] = await Promise.all([
-    results.length < CATALOG_RESULTS
-      ? coverSearchByTitle(cleanTitle, cleanAuthors, CATALOG_RESULTS - results.length, report)
-      : [],
-    (cleanTitle || cleanAuthors)
-      ? webCoverCandidates(cleanTitle, cleanAuthors, WEB_RESULTS, report)
-      : [],
-  ]);
-
-  // Les couvertures de catalogue passent devant : elles correspondent à une
-  // édition identifiée, là où une image du web est une ressemblance.
-  results.push(...catalog, ...web);
-
-  return { results, errors, ok: report.ok };
+  emit({ type: 'start', sources: jobs.map((j) => j.name) });
+  await Promise.all(jobs.map(async ({ name, fn }) => {
+    try {
+      await fn();
+      emit({ type: 'source', name, state: 'done' });
+    } catch (e) {
+      emit({ type: 'source', name, state: 'error', message: e.message });
+    }
+  }));
+  emit({ type: 'done' });
 }
 
 // La couverture que Google Books associe à cet ISBN, sous forme de spécification
@@ -524,7 +501,7 @@ async function googleBooksCover(isbn) {
 
 module.exports = {
   lookupIsbn,
-  imageSearch,
+  imageSearchStream,
   fetchCoverImage,
   googleBooksCover,
   openLibraryCoverUrl,

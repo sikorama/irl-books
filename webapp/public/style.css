@@ -552,3 +552,17 @@ form .form-grid { display: flex; gap: 1.2rem; flex-wrap: wrap; }
   margin: 0.6rem 0 0.3rem;
 }
 .image-search-group:first-child { margin-top: 0; }
+
+.search-progress { display: flex; align-items: center; gap: 0.45rem; }
+.spinner {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex-shrink: 0;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.search-problems:empty { display: none; }

@@ -540,52 +540,100 @@
 
       imageSearchBtn.disabled = true;
       imageSearchResults.classList.remove('hidden');
-      imageSearchResults.innerHTML = '<p class="image-search-status">Searching…</p>';
+      // Les résultats de catalogue correspondent à une édition identifiée, les
+      // images du web sont une simple ressemblance : la provenance doit être
+      // visible avant de cliquer. Les deux grilles existent dès le départ pour
+      // pouvoir y verser les vignettes au fil de leur arrivée.
+      imageSearchResults.innerHTML = `
+        <p class="image-search-status search-progress">
+          <span class="spinner" aria-hidden="true"></span><span class="progress-label">Starting…</span>
+        </p>
+        <div class="image-search-section hidden" data-group="catalog">
+          <p class="image-search-group">From catalogs (matched edition)</p>
+          <div class="image-search-grid"></div>
+        </div>
+        <div class="image-search-section hidden" data-group="web">
+          <p class="image-search-group">From the web (check it matches)</p>
+          <div class="image-search-grid"></div>
+        </div>
+        <p class="image-search-status error search-problems"></p>
+        <button type="button" class="secondary image-search-close">None of these</button>
+      `;
+      imageSearchResults.querySelector('.image-search-close').addEventListener('click', closeImageSearch);
+
+      const progressEl = imageSearchResults.querySelector('.search-progress');
+      const labelEl = imageSearchResults.querySelector('.progress-label');
+      const problemsEl = imageSearchResults.querySelector('.search-problems');
+      const startedAt = Date.now();
+      const problems = [];
+      let pending = 0;
+      let found = 0;
+
+      const tick = setInterval(() => {
+        const seconds = Math.round((Date.now() - startedAt) / 1000);
+        labelEl.textContent = `Searching ${pending} source${pending !== 1 ? 's' : ''}… ${seconds}s · ${found} cover${found !== 1 ? 's' : ''} found`;
+      }, 250);
+
+      function addResult(result) {
+        found++;
+        const section = imageSearchResults.querySelector(`.image-search-section[data-group="${result.group === 'web' ? 'web' : 'catalog'}"]`);
+        section.classList.remove('hidden');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'image-search-thumb';
+        btn.title = [result.title, result.source].filter(Boolean).join(' — ');
+        btn.innerHTML = `<img src="${result.cover_base64}" alt="${escapeHtml(result.title || '')}">`;
+        btn.addEventListener('click', () => setCoverFromSearch(result.cover_base64));
+        section.querySelector('.image-search-grid').appendChild(btn);
+      }
+
+      function handleEvent(event) {
+        if (event.type === 'start') pending = event.sources.length;
+        if (event.type === 'result') addResult(event.result);
+        if (event.type === 'source') {
+          pending = Math.max(0, pending - 1);
+          if (event.state === 'error') {
+            problems.push(`${event.name}: ${event.message}`);
+            problemsEl.textContent = problems.join(' · ');
+          }
+        }
+      }
+
       try {
         const params = new URLSearchParams();
         if (titleVal) params.set('title', titleVal);
         if (authorsVal) params.set('authors', authorsVal);
         if (isbnVal) params.set('isbn', isbnVal);
-        const res = await fetch(`/api/image-search?${params}`);
-        const data = await res.json();
-        if (!data.results || !data.results.length) {
-          // Une panne de catalogue et « ce livre n'a de couverture nulle part »
-          // s'affichaient à l'identique : impossible de savoir quoi faire.
-          const problem = data.error || data.warning;
-          imageSearchResults.innerHTML = problem
-            ? `<p class="image-search-status error">${escapeHtml(problem)}</p>`
-            : '<p class="image-search-status">No results found.</p>';
-          return;
-        }
-        const warning = data.warning
-          ? `<p class="image-search-status error">${escapeHtml(data.warning)}</p>`
-          : '';
-        // Les résultats de catalogue correspondent à une édition identifiée,
-        // les images du web sont une simple ressemblance : la provenance doit
-        // être visible avant de cliquer.
-        const group = (label, items) => (items.length ? `
-          <p class="image-search-group">${label}</p>
-          <div class="image-search-grid">
-            ${items.map((r) => `
-              <button type="button" class="image-search-thumb" data-index="${r._i}" title="${escapeHtml([r.title, r.source].filter(Boolean).join(' — '))}">
-                <img src="${r.cover_base64}" alt="${escapeHtml(r.title || '')}">
-              </button>`).join('')}
-          </div>` : '');
 
-        const indexed = data.results.map((r, i) => ({ ...r, _i: i }));
-        imageSearchResults.innerHTML = `
-          ${warning}
-          ${group('From catalogs (matched edition)', indexed.filter((r) => r.source === 'catalog'))}
-          ${group('From the web (check it matches)', indexed.filter((r) => r.source !== 'catalog'))}
-          <button type="button" class="secondary image-search-close">None of these</button>
-        `;
-        imageSearchResults.querySelectorAll('.image-search-thumb').forEach((btn) => {
-          btn.addEventListener('click', () => setCoverFromSearch(data.results[Number(btn.dataset.index)].cover_base64));
-        });
-        imageSearchResults.querySelector('.image-search-close').addEventListener('click', closeImageSearch);
+        const res = await fetch(`/api/image-search?${params}`);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // la dernière peut être incomplète
+          for (const line of lines) {
+            if (line.trim()) handleEvent(JSON.parse(line));
+          }
+        }
+
+        const seconds = Math.round((Date.now() - startedAt) / 1000);
+        if (found) {
+          progressEl.textContent = `${found} cover${found !== 1 ? 's' : ''} found in ${seconds}s.`;
+        } else {
+          progressEl.textContent = problems.length
+            ? `No cover found in ${seconds}s — every source failed.`
+            : 'No results found.';
+        }
       } catch (err) {
-        imageSearchResults.innerHTML = `<p class="image-search-status error">${escapeHtml(err.message)}</p>`;
+        progressEl.textContent = '';
+        problems.push(err.message);
+        problemsEl.textContent = problems.join(' · ');
       } finally {
+        clearInterval(tick);
         imageSearchBtn.disabled = false;
       }
     });

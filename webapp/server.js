@@ -8,7 +8,7 @@ const path = require('path');
 const { openDb } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
 const { GENRES, guessGenre } = require('./lib/categorize.js');
-const { lookupIsbn, imageSearch, hasGoogleBooksKey, describeGoogleBooksKey } = require('./lib/lookup.js');
+const { lookupIsbn, imageSearchStream, hasGoogleBooksKey, describeGoogleBooksKey } = require('./lib/lookup.js');
 const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
 
 // Usage: node server.js [--http]
@@ -415,24 +415,31 @@ async function handleApi(req, res, url) {
     }
   }
 
+  // Flux NDJSON : une ligne JSON par évènement, écrite dès qu'elle est connue.
+  // La recherche interroge cinq sources dont certaines mettent une vingtaine de
+  // secondes ; attendre la plus lente pour tout afficher d'un coup donnait
+  // l'impression que rien ne se passait.
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'image-search') {
+    res.writeHead(200, {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Accel-Buffering': 'no',
+    });
+    const emit = (event) => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(`${JSON.stringify(event)}\n`);
+    };
     try {
-      const { results, errors, ok } = await imageSearch({
+      await imageSearchStream({
         title: url.searchParams.get('title'),
         authors: url.searchParams.get('authors'),
         isbn: url.searchParams.get('isbn'),
-      });
-      // Échec réel seulement si aucune source n'a répondu. Si au moins une a
-      // cherché et n'a rien trouvé, c'est un résultat vide légitime — on
-      // signale quand même les sources tombées, qui expliquent une grille plus
-      // pauvre que d'habitude.
-      if (!results.length && !ok) {
-        return sendJson(res, 502, { results, error: `Search failed — ${errors.join(' · ')}` });
-      }
-      return sendJson(res, 200, { results, warning: errors.length ? errors.join(' · ') : undefined });
+      }, emit);
     } catch (e) {
-      return sendJson(res, 502, { results: [], error: `Search failed: ${e.message}` });
+      emit({ type: 'source', name: 'search', state: 'error', message: e.message });
+      emit({ type: 'done' });
     }
+    return res.end();
   }
 
   if (req.method === 'GET' && parts.length === 3 && parts[1] === 'isbn-lookup') {

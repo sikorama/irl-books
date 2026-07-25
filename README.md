@@ -37,11 +37,16 @@ the answers field by field, in this order of precedence:
 | Open Library | yes | Good on English books, patchy on French ones. |
 | Google Books | yes | Needs an API key in practice, see below. |
 
-Cover search by title (the 🔍 button on a book) queries Google Books, Open
-Library's `search.json` **and** a DuckDuckGo image search, in parallel. Results
-are shown in two groups — catalog covers (matched to an edition) first, web
-images (a visual likeness, check before picking) after, each labelled with the
-host it came from.
+Cover search by title (the 🔍 button on a book) queries five sources at once —
+Open Library and Google Books by ISBN, both again by title, plus a DuckDuckGo
+image search. `/api/image-search` streams **NDJSON**: one JSON event per line,
+written the moment it is known, so thumbnails appear as each source answers
+instead of after the slowest one. The panel shows a spinner, elapsed seconds,
+how many sources are still running, and how many covers have arrived.
+
+Results are shown in two groups — catalog covers (matched to an edition) first,
+web images (a visual likeness, check before picking) after, each labelled with
+the host it came from.
 
 The web search matters because the catalogs are jointly unavailable more often
 than you'd expect, and simply don't know a large part of a French collection.
