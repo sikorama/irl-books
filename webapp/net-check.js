@@ -84,9 +84,25 @@ async function probe(label, url) {
   return { ok: result.ok, dnsMs: lookup.ms, dnsFailed: Boolean(lookup.failed) };
 }
 
+// A uniform multi-second delay on every name is almost always configuration,
+// not a slow upstream: an unreachable first nameserver that has to time out, or
+// `ndots`/`search` making every lookup try bogus suffixes first.
+function showResolverConfig() {
+  try {
+    const conf = require('node:fs').readFileSync('/etc/resolv.conf', 'utf8')
+      .split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+    console.log('/etc/resolv.conf:');
+    for (const line of conf) console.log(`   ${line}`);
+  } catch (e) {
+    console.log(`/etc/resolv.conf unreadable: ${e.message}`);
+  }
+  console.log('');
+}
+
 async function main() {
   console.log(`Node ${process.version} — Google Books key: ${KEY ? `set (…${KEY.slice(-4)})` : 'NOT SET'}, country=${COUNTRY}`);
   console.log('');
+  showResolverConfig();
   const results = [];
   for (const [label, url] of TARGETS) {
     results.push([label, await probe(label, url)]);

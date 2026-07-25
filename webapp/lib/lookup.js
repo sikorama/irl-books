@@ -21,10 +21,11 @@ const { searchImages } = require('./ddg-images.js');
 const CATALOG_RESULTS = 5;
 const WEB_RESULTS = 5;
 
-// Strictement ASCII. Une valeur d'en-tête HTTP ne peut pas contenir autre chose
-// (RFC 9110) : undici transmet l'octet accentué tel quel, et les frontaux
-// stricts comme celui de Google rejettent la requête — ce qui remontait ici
-// sous forme de « 503 » incompréhensible.
+// Strictement ASCII : une valeur d'en-tête HTTP ne peut pas contenir autre
+// chose (RFC 9110), et undici transmet l'octet accentué tel quel. Cette version
+// contenait « bibliothèque » ; ce n'était pas la cause des 503 constatés
+// (vérifié en rejouant la requête sans en-tête personnalisé), mais ça restait
+// une requête malformée.
 const USER_AGENT = 'IRL-Books/1.0 (personal library catalog)';
 const TIMEOUT_MS = 8000;
 const COVER_TIMEOUT_MS = 12000;
@@ -35,10 +36,10 @@ const COVER_TIMEOUT_MS = 12000;
 const GOOGLE_BOOKS_KEY = process.env.GOOGLE_BOOKS_KEY || '';
 
 // Google Books géolocalise l'IP appelante pour décider quelles éditions il a le
-// droit de montrer. Quand il n'y arrive pas — ce qui est courant depuis un
-// conteneur, un VPN ou un hébergeur — il répond « 503 backendError » au lieu
-// d'une erreur explicite. Envoyer le pays systématiquement supprime le
-// problème.
+// droit de montrer, et échoue de façon opaque quand il n'y arrive pas. L'envoyer
+// explicitement lève cette ambiguïté — ça n'a pas résolu les « 503
+// backendFailed » observés en conteneur, qui viennent bien de chez Google, mais
+// ça écarte une cause possible et fixe le catalogue interrogé.
 const GOOGLE_BOOKS_COUNTRY = process.env.GOOGLE_BOOKS_COUNTRY || 'FR';
 
 // undici résume toute panne réseau en « fetch failed » et range le motif réel
@@ -73,12 +74,22 @@ async function httpGet(url, { timeout = TIMEOUT_MS, accept, retries = 1 } = {}) 
 // recherche n'ajoute que de la latence et du bruit dans les logs : on met la
 // source en pause et on la re-teste au bout d'une heure — assez court pour se
 // remettre d'un pic passager, assez long pour ne pas marteler l'API.
-const GOOGLE_BOOKS_COOLDOWN_MS = 60 * 60 * 1000;
+const QUOTA_COOLDOWN_MS = 60 * 60 * 1000;
+// `backendFailed` est censé être passager, mais quand il l'est pas on ne va pas
+// payer deux allers-retours par recherche pour le redécouvrir : pause courte,
+// et on retente régulièrement.
+const BACKEND_COOLDOWN_MS = 10 * 60 * 1000;
 let googleBooksPausedUntil = 0;
 
-function pauseGoogleBooks() {
-  googleBooksPausedUntil = Date.now() + GOOGLE_BOOKS_COOLDOWN_MS;
-  console.warn('[isbn] quota Google Books épuisé — source mise en pause 1 h.');
+function pauseGoogleBooks(ms, reason) {
+  googleBooksPausedUntil = Date.now() + ms;
+  console.warn(`[isbn] Google Books ${reason} — source mise en pause ${Math.round(ms / 60000)} min.`);
+}
+
+// Le 429 vaut pour la journée ; le 5xx est censé passer, on retente plus tôt.
+function noteGoogleBooksFailure(status) {
+  if (status === 429) pauseGoogleBooks(QUOTA_COOLDOWN_MS, 'quota journalier épuisé');
+  else if (status >= 500) pauseGoogleBooks(BACKEND_COOLDOWN_MS, `en panne (HTTP ${status})`);
 }
 
 function googleBooksPaused() {
@@ -285,11 +296,11 @@ async function lookupIsbnOpenLibrary(isbn) {
 async function lookupIsbnGoogleBooks(isbn) {
   if (googleBooksPaused()) return null;
   const res = await httpGet(googleBooksUrl({ q: `isbn:${isbn}` }), { accept: 'application/json' });
-  if (res.status === 429) {
-    pauseGoogleBooks();
-    return null;
+  if (!res.ok) {
+    noteGoogleBooksFailure(res.status);
+    if (res.status === 429) return null;
+    throw new Error(`HTTP ${res.status}`);
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   const item = Array.isArray(data.items) ? data.items[0] : null;
   if (!item) return null;
@@ -363,15 +374,14 @@ async function lookupIsbn(isbn) {
 
 // Candidats Google Books pour une recherche titre/auteur.
 async function googleTitleCandidates(query, limit) {
-  if (googleBooksPaused()) throw new Error('quota épuisé, source en pause');
+  if (googleBooksPaused()) throw new Error('source en pause après un échec répété');
   const res = await httpGet(googleBooksUrl({ q: query, maxResults: '20', printType: 'books' }), {
     accept: 'application/json',
   });
-  if (res.status === 429) {
-    pauseGoogleBooks();
-    throw new Error('HTTP 429 (quota journalier épuisé)');
+  if (!res.ok) {
+    noteGoogleBooksFailure(res.status);
+    throw new Error(res.status === 429 ? 'HTTP 429 (quota journalier épuisé)' : `HTTP ${res.status}`);
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
 
   const candidates = [];
