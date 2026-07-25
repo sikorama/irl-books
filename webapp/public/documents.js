@@ -63,10 +63,6 @@
     return `/api/documents/${doc.id}/cover`;
   }
 
-  function fieldRow(label, inputHtml, { full = false } = {}) {
-    return `<div class="field-row${full ? ' full' : ''}"><label>${label}</label>${inputHtml}</div>`;
-  }
-
   function buildQuery() {
     const params = new URLSearchParams();
     if (searchInput.value.trim()) params.set('q', searchInput.value.trim());
@@ -286,92 +282,16 @@
   });
 
   async function openDetail(id) {
-    const res = await fetch(`/api/documents/${id}`);
-    const doc = await res.json();
-
-    // Un document peut porter plusieurs formats du même contenu : chacun a son
-    // lien, et un fichier annoncé mais absent du disque est signalé au lieu
-    // d'offrir un lien mort.
-    const fileList = doc.files.map((f) => {
-      const label = `${f.format} · ${formatSize(f.file_size)}`;
-      if (f.missing) {
-        return `<li class="doc-file missing"><span>${escapeHtml(label)}</span> <em>missing from disk</em></li>`;
-      }
-      return `<li class="doc-file">
-        <a href="/api/documents/${doc.id}/file?format=${encodeURIComponent(f.format)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>
-        <a class="doc-download" href="/api/documents/${doc.id}/file?format=${encodeURIComponent(f.format)}&download=1" title="Download">⬇️</a>
-      </li>`;
-    }).join('');
-
-    const identifierRows = Object.entries(doc.identifiers || {})
-      .map(([k, v]) => `<li>${escapeHtml(k)}: ${escapeHtml(v)}</li>`).join('');
-
-    detailContent.innerHTML = `
-      <div class="detail-layout">
-        <div class="cover-col">
-          <img class="cover" src="${coverUrl(doc)}" alt="${escapeHtml(doc.title)}">
-          <ul class="doc-files">${fileList || '<li class="doc-file missing"><em>no file</em></li>'}</ul>
-          <p class="doc-path" title="${escapeHtml(doc.dir)}">${escapeHtml(doc.dir)}</p>
-        </div>
-        <div class="detail-fields">
-          ${fieldRow('Title', `<input type="text" class="field-input" data-field="title" value="${escapeHtml(doc.title)}">`, { full: true })}
-          ${fieldRow('Author(s)', `<input type="text" class="field-input" data-field="authors" value="${escapeHtml(doc.authors.join(', '))}">`, { full: true })}
-          ${fieldRow('Genre', `<select class="field-input" data-field="genre">${genreOptionsHtml(doc.genre)}</select>`)}
-          ${fieldRow('Year', `<input type="number" class="field-input" data-field="pub_year" value="${escapeHtml(doc.pub_year || '')}">`)}
-          ${fieldRow('Publisher', `<input type="text" class="field-input" data-field="publisher" value="${escapeHtml(doc.publisher || '')}">`)}
-          ${fieldRow('Language', `<input type="text" class="field-input" data-field="language" value="${escapeHtml(doc.language || '')}">`)}
-          ${fieldRow('Series', `<input type="text" class="field-input" data-field="series" value="${escapeHtml(doc.series || '')}">`)}
-          ${fieldRow('No. in series', `<input type="number" step="any" class="field-input" data-field="series_index" value="${escapeHtml(doc.series_index ?? '')}">`)}
-          ${fieldRow('DOI', `<input type="text" class="field-input" data-field="doi" value="${escapeHtml(doc.doi || '')}">`)}
-          ${fieldRow('ISBN', `<input type="text" class="field-input" data-field="isbn" value="${escapeHtml(doc.isbn || '')}">`)}
-          ${fieldRow('Tags, comma-separated', `<input type="text" class="field-input" data-field="tags" value="${escapeHtml(doc.tags.join(', '))}">`, { full: true })}
-          ${fieldRow('Notes', `<textarea class="field-input" data-field="notes" rows="3">${escapeHtml(doc.notes || '')}</textarea>`, { full: true })}
-          <div class="field-row full doc-facts">
-            <span>${escapeHtml(doc.format || '—')}</span>
-            <span>${formatSize(doc.size)}</span>
-            ${doc.pages ? `<span>${doc.pages} pages</span>` : ''}
-            <span>added ${escapeHtml((doc.created_at || '').slice(0, 10))}</span>
-            <span>metadata: ${escapeHtml(doc.meta_source || '—')}</span>
-            ${doc.indexed ? '<span>indexed</span>' : ''}
-          </div>
-          ${doc.comments ? `<div class="field-row full doc-comments">${doc.comments}</div>` : ''}
-          ${identifierRows ? `<ul class="doc-identifiers">${identifierRows}</ul>` : ''}
-          <p class="field-save-status"></p>
-        </div>
-      </div>
-    `;
-
-    const statusEl = detailContent.querySelector('.field-save-status');
-
-    async function saveField(patch) {
-      statusEl.textContent = 'Saving…';
-      try {
-        const saveRes = await fetch(`/api/documents/${doc.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(patch),
-        });
-        if (!saveRes.ok) {
-          const err = await saveRes.json();
-          throw new Error(err.error || 'Unknown error');
-        }
-        Object.assign(doc, await saveRes.json());
-        statusEl.textContent = 'Saved ✓';
+    await window.DocDetail.open({
+      id,
+      container: detailContent,
+      overlay: detailOverlay,
+      genreOptionsHtml,
+      onSaved: async (patch) => {
         if ('genre' in patch || 'series' in patch) await loadFacets();
         await loadDocuments();
-      } catch (err) {
-        statusEl.textContent = err.message;
-      }
-    }
-
-    detailContent.querySelectorAll('.field-input').forEach((input) => {
-      input.addEventListener('change', () => {
-        const field = input.dataset.field;
-        saveField({ [field]: input.type === 'checkbox' ? input.checked : input.value });
-      });
+      },
     });
-
-    detailOverlay.classList.remove('hidden');
   }
 
   document.querySelectorAll('[data-close]').forEach((btn) => {

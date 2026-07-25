@@ -58,10 +58,22 @@
   let currentBooks = [];
   let quickLibraryBookId = null;
   let quickGenreBookId = null;
+  let quickGenreEndpoint = 'books';
   let genreCatalog = [];
   const selectedIds = new Set();
   let lastLibrary = localStorage.getItem('irl-books:lastLibrary') || '';
   let lastGenre = localStorage.getItem('irl-books:lastGenre') || '';
+
+  // Le cloud est une pièce du catalogue : les documents numérisés y vivent comme
+  // les livres papier vivent dans le Grand Bureau ou le Grenier.
+  const CLOUD_ROOM = 'cloud';
+
+  function formatSize(bytes) {
+    if (!bytes) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    return `${(bytes / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
+  }
 
   function genreLabel(value) {
     if (!value) return null;
@@ -133,11 +145,14 @@
     }[c]));
   }
 
-  // La révision fait partie de l'URL : sans elle le navigateur garderait
-  // l'ancienne couverture en cache et changer d'image n'aurait aucun effet
-  // visible.
-  function coverUrl(book) {
-    return `/api/books/${book.id}/cover?v=${book.cover_rev || 0}`;
+  // L'URL vient du serveur, parce que les deux collections ne la construisent
+  // pas pareil : une fiche papier porte sa révision de couverture (sans elle le
+  // navigateur garderait l'ancienne image en cache et changer de couverture
+  // n'aurait aucun effet visible), un document du cloud est servi depuis le
+  // disque avec un ETag sur la taille et la date.
+  function coverUrl(entry) {
+    if (entry.cover_url) return entry.cover_url;
+    return `/api/books/${entry.id}/cover?v=${entry.cover_rev || 0}`;
   }
 
   function buildQuery() {
@@ -154,6 +169,10 @@
   async function loadLibraries() {
     const res = await fetch('/api/libraries');
     const libs = await res.json();
+    // Le cloud est une pièce du catalogue, donc présent dans le filtre — mais
+    // c'est une pièce virtuelle : on ne peut pas y « déplacer » un livre papier,
+    // ni en créer un dedans. Toute liste de destination l'exclut.
+    const realRooms = libs.filter((lib) => lib.name && !lib.virtual);
     const current = libSelect.value;
     [...libSelect.options].slice(1).forEach((o) => o.remove());
     for (const lib of libs) {
@@ -165,15 +184,14 @@
     libSelect.value = current;
 
     const currentLibraryChoice = librarySelect.value;
-    librarySelect.innerHTML = '<option value="">Choose a room…</option>' + libs
-      .filter((lib) => lib.name)
+    librarySelect.innerHTML = '<option value="">Choose a room…</option>' + realRooms
       .map((lib) => `<option value="${escapeHtml(lib.name)}">${escapeHtml(lib.name)} (${lib.count})</option>`)
       .join('');
     librarySelect.value = currentLibraryChoice;
 
     const currentMoveTarget = moveTargetSelect.value;
     [...moveTargetSelect.options].slice(1).forEach((o) => o.remove());
-    for (const lib of libs.filter((l) => l.name)) {
+    for (const lib of realRooms) {
       const opt = document.createElement('option');
       opt.value = lib.name;
       opt.textContent = `${lib.name} (${lib.count})`;
@@ -192,8 +210,12 @@
     selectionCountEl.textContent = `${n} selected`;
     moveBtn.disabled = n === 0 || !moveTargetSelect.value;
     genreBtn.disabled = n === 0 || !genreTargetSelect.value;
-    const idsOnPage = currentBooks.map((b) => b.id);
+    const idsOnPage = currentBooks.map((b) => b.uid);
     selectAllCheckbox.checked = idsOnPage.length > 0 && idsOnPage.every((id) => selectedIds.has(id));
+    // Déplacer vers une pièce n'a de sens que pour du papier : si la sélection
+    // ne contient que des documents du cloud, le bouton reste inerte.
+    const hasBooks = [...selectedIds].some((uid) => String(uid).startsWith('b'));
+    moveBtn.disabled = moveBtn.disabled || !hasBooks;
   }
 
   function setSelectMode(on) {
@@ -216,54 +238,83 @@
     updateSelectionUI();
   }
 
-  function renderCard(book) {
+  // Une carte est soit une fiche papier, soit un document du cloud. Ce qui
+  // diffère : la troisième ligne (ISBN pour le papier, année et poids du fichier
+  // pour un document), et le fait que la pastille de pièce d'un document n'est
+  // pas cliquable — on ne déménage pas un fichier dans le Grenier.
+  function renderCard(entry) {
+    const isDoc = entry.kind === 'document';
     const card = document.createElement('div');
-    card.className = 'card' + (selectedIds.has(book.id) ? ' selected' : '');
-    card.dataset.id = book.id;
+    card.className = 'card' + (selectedIds.has(entry.uid) ? ' selected' : '') + (isDoc ? ' doc-card' : '');
+    card.dataset.id = entry.uid;
 
     const badges = [];
-    badges.push(`<span class="badge location">${escapeHtml(book.library || 'Unknown room')}</span>`);
-    badges.push(`<span class="badge genre">${escapeHtml(genreLabel(book.genre) || 'No genre')}</span>`);
-    if (book.loaned) badges.push('<span class="badge loaned">Loaned</span>');
+    badges.push(isDoc
+      ? `<span class="badge location cloud">☁️ ${escapeHtml(entry.format || CLOUD_ROOM)}</span>`
+      : `<span class="badge location">${escapeHtml(entry.library || 'Unknown room')}</span>`);
+    badges.push(`<span class="badge genre">${escapeHtml(genreLabel(entry.genre) || 'No genre')}</span>`);
+    if (entry.loaned) badges.push('<span class="badge loaned">Loaned</span>');
+    if (isDoc && entry.missing_count) badges.push('<span class="badge loaned">Missing</span>');
+
+    const thirdLine = isDoc
+      ? [entry.pub_year, formatSize(entry.size)].filter(Boolean).join(' · ')
+      : entry.isbn;
 
     card.innerHTML = `
       <div class="cover-wrap">
         <label class="card-select">
-          <input type="checkbox" class="card-select-input" ${selectedIds.has(book.id) ? 'checked' : ''}>
+          <input type="checkbox" class="card-select-input" ${selectedIds.has(entry.uid) ? 'checked' : ''}>
         </label>
-        <img loading="lazy" src="${coverUrl(book)}" alt="${escapeHtml(book.title)}">
+        <img loading="lazy" src="${coverUrl(entry)}" alt="${escapeHtml(entry.title)}">
         <div class="badges">${badges.join('')}</div>
       </div>
       <div class="meta">
-        <p class="title">${escapeHtml(book.title)}</p>
-        <p class="authors">${escapeHtml(book.authors.join(', ') || '—')}</p>
-        <p class="isbn">${escapeHtml(book.isbn || '—')}</p>
+        <p class="title">${escapeHtml(entry.title)}</p>
+        <p class="authors">${escapeHtml(entry.authors.join(', ') || '—')}</p>
+        <p class="isbn">${escapeHtml(thirdLine || '—')}</p>
       </div>
     `;
 
     card.querySelector('.card-select-input').addEventListener('change', (e) => {
-      toggleSelect(book.id, e.target.checked);
+      toggleSelect(entry.uid, e.target.checked);
       card.classList.toggle('selected', e.target.checked);
     });
 
     card.addEventListener('click', (e) => {
-      if (e.target.closest('.badge.location')) {
+      if (!isDoc && e.target.closest('.badge.location')) {
         e.stopPropagation();
-        openQuickLibrary(book);
+        openQuickLibrary(entry);
         return;
       }
       if (e.target.closest('.badge.genre')) {
         e.stopPropagation();
-        openQuickGenre(book);
+        openQuickGenre(entry);
         return;
       }
-      if (!selectMode) { openDetail(book.id); return; }
+      if (!selectMode) {
+        if (isDoc) openDocumentDetail(entry.id);
+        else openDetail(entry.id);
+        return;
+      }
       if (e.target.closest('.card-select')) return;
       const input = card.querySelector('.card-select-input');
       input.checked = !input.checked;
       input.dispatchEvent(new Event('change'));
     });
     return card;
+  }
+
+  function openDocumentDetail(id) {
+    return window.DocDetail.open({
+      id,
+      container: detailContent,
+      overlay: detailOverlay,
+      genreOptionsHtml: (selected) => genreOptionsHtml(selected),
+      onSaved: async () => {
+        await loadGenres();
+        await loadBooks();
+      },
+    });
   }
 
   async function openQuickLibrary(book) {
@@ -273,7 +324,7 @@
     const res = await fetch('/api/libraries');
     const libs = await res.json();
     quickLibrarySelect.innerHTML = '<option value="">Unknown room</option>' + libs
-      .filter((lib) => lib.name)
+      .filter((lib) => lib.name && !lib.virtual)
       .map((lib) => `<option value="${escapeHtml(lib.name)}" ${lib.name === (book.library || '') ? 'selected' : ''}>${escapeHtml(lib.name)} (${lib.count})</option>`)
       .join('');
     quickLibraryOverlay.classList.remove('hidden');
@@ -301,11 +352,13 @@
     }
   });
 
-  function openQuickGenre(book) {
-    quickGenreBookId = book.id;
-    quickGenreTitle.textContent = book.title;
+  function openQuickGenre(entry) {
+    quickGenreBookId = entry.id;
+    // Le genre existe des deux côtés, mais pas au même endroit de l'API.
+    quickGenreEndpoint = entry.kind === 'document' ? 'documents' : 'books';
+    quickGenreTitle.textContent = entry.title;
     quickGenreStatus.textContent = '';
-    quickGenreSelect.innerHTML = genreOptionsHtml(book.genre);
+    quickGenreSelect.innerHTML = genreOptionsHtml(entry.genre);
     quickGenreOverlay.classList.remove('hidden');
   }
 
@@ -314,7 +367,7 @@
     quickGenreSelect.disabled = true;
     quickGenreStatus.textContent = 'Saving…';
     try {
-      const res = await fetch(`/api/books/${quickGenreBookId}`, {
+      const res = await fetch(`/api/${quickGenreEndpoint}/${quickGenreBookId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ genre }),
@@ -358,14 +411,14 @@
   cancelSelectBtn.addEventListener('click', () => setSelectMode(false));
 
   selectAllCheckbox.addEventListener('change', () => {
-    const idsOnPage = currentBooks.map((b) => b.id);
+    const idsOnPage = currentBooks.map((b) => b.uid);
     if (selectAllCheckbox.checked) {
       idsOnPage.forEach((id) => selectedIds.add(id));
     } else {
       idsOnPage.forEach((id) => selectedIds.delete(id));
     }
     grid.querySelectorAll('.card').forEach((card) => {
-      const id = Number(card.dataset.id);
+      const id = card.dataset.id;
       const checked = selectedIds.has(id);
       card.classList.toggle('selected', checked);
       const input = card.querySelector('.card-select-input');
@@ -392,8 +445,10 @@
       if (!res.ok) throw new Error(data.error || 'Unknown error');
 
       if (data.failed && data.failed.length) {
-        const names = data.failed.map((f) => f.title || `#${f.id}`).join(', ');
-        alert(`${data.count} book(s) moved.\n${data.failed.length} book(s) not moved (a book with the same import identifier already exists in "${library}"): ${names}`);
+        // Chaque échec porte sa propre raison : conflit d'identifiant d'import
+        // pour un livre, absence de pièce physique pour un document du cloud.
+        const lines = data.failed.map((f) => `• ${f.title || `#${f.id}`} — ${f.error}`).join('\n');
+        alert(`${data.count} item(s) moved.\n${data.failed.length} not moved:\n${lines}`);
         data.moved.forEach((id) => selectedIds.delete(id));
         await loadLibraries();
         await loadBooks();
@@ -450,7 +505,7 @@
     const book = await bookRes.json();
     const libs = await libsRes.json();
     const libraryOptions = '<option value="">Unknown room</option>' + libs
-      .filter((lib) => lib.name)
+      .filter((lib) => lib.name && !lib.virtual)
       .map((lib) => `<option value="${escapeHtml(lib.name)}" ${lib.name === (book.library || '') ? 'selected' : ''}>${escapeHtml(lib.name)} (${lib.count})</option>`)
       .join('');
     detailContent.innerHTML = `

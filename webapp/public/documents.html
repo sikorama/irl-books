@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Alexandria — Documents</title>
+<title>Alexandria — Cloud</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body class="documents">
 <header class="topbar">
-  <h1>📄 Documents</h1>
+  <h1>☁️ Cloud</h1>
   <div class="controls">
     <input id="search" type="search" placeholder="Title, author, series, publisher, tag…">
     <select id="format-filter">
@@ -33,7 +33,7 @@
       <label title="File missing from disk"><input type="checkbox" data-flag="missing"> ⚠️</label>
     </div>
     <button id="select-toggle-btn" class="secondary icon-btn" title="Select">☑️</button>
-    <a href="/index.html" class="secondary icon-btn" title="Physical books">📚</a>
+    <a href="/index.html" class="secondary icon-btn" title="Whole catalog">📚</a>
     <a href="/settings.html" class="secondary icon-btn" title="Settings">⚙️</a>
   </div>
   <div class="status" id="status"></div>
@@ -71,6 +71,7 @@
   </div>
 </div>
 
+<script src="/doc-detail.js"></script>
 <script src="/documents.js"></script>
 </body>
 </html>

@@ -73,6 +73,9 @@ function decodeCoverBase64(coverBase64) {
 
 function rowToBook(row) {
   return {
+    uid: `b${row.id}`,
+    kind: 'book',
+    cover_url: `/api/books/${row.id}/cover?v=${row.cover_rev || 0}`,
     id: row.id,
     library: row.library,
     ident: row.ident,
@@ -140,17 +143,75 @@ function listBooks(query) {
   return rows.map(rowToBook);
 }
 
-function getLibraries() {
-  return db.prepare('SELECT library, COUNT(*) c FROM books GROUP BY library ORDER BY library COLLATE NOCASE')
-    .all()
-    .map((r) => ({ name: r.library, count: r.c }));
+// Le catalogue réunit les fiches papier et le cloud. Les filtres propres au
+// papier (prêt, ISBN manquant) excluent donc le cloud plutôt que de le filtrer
+// sur des colonnes qui n'ont pas de sens pour un fichier.
+const CLOUD = documents.CLOUD_ROOM;
+
+function wantsBooks(query) {
+  return !query.library || query.library !== CLOUD;
 }
 
+function wantsDocuments(query) {
+  if (query.library && query.library !== CLOUD) return false;
+  // « prêté » et « sans ISBN » sont des notions de livre physique : les activer
+  // veut dire qu'on cherche dans le papier.
+  if (query.loaned === '1' || query.loaned === '0') return false;
+  if (query.no_isbn === '1') return false;
+  return true;
+}
+
+// Les actions groupées reçoivent des `uid` (« b12 », « d34 ») parce qu'une
+// sélection peut mêler les deux collections. Les identifiants purement
+// numériques sont acceptés et traités comme des livres, pour ne pas casser un
+// appel plus ancien.
+function splitUids(rawIds) {
+  const books = [];
+  const docs = [];
+  for (const raw of Array.isArray(rawIds) ? rawIds : []) {
+    const value = String(raw);
+    const m = /^([bd])(\d+)$/.exec(value);
+    if (m) {
+      (m[1] === 'b' ? books : docs).push(Number(m[2]));
+      continue;
+    }
+    const n = Number(value);
+    if (Number.isInteger(n)) books.push(n);
+  }
+  return { books, documents: docs };
+}
+
+function listCatalog(query) {
+  const entries = [];
+  if (wantsBooks(query)) entries.push(...listBooks(query));
+  if (wantsDocuments(query)) {
+    entries.push(...documents
+      .listDocuments(db, { q: query.q, genre: query.genre, no_cover: query.no_cover })
+      .map(documents.toCatalogEntry));
+  }
+  // Un seul tri sur l'ensemble, sinon les deux collections se retrouveraient
+  // empilées l'une après l'autre. `localeCompare` plutôt que le COLLATE NOCASE
+  // de SQLite, qui ne connaît que l'ASCII et classerait « Édition » après « Zoo ».
+  entries.sort((a, b) => String(a.title).localeCompare(String(b.title), 'fr', { sensitivity: 'base' }));
+  return entries;
+}
+
+function getLibraries() {
+  const rooms = db.prepare('SELECT library, COUNT(*) c FROM books GROUP BY library ORDER BY library COLLATE NOCASE')
+    .all()
+    .map((r) => ({ name: r.library, count: r.c }));
+  const cloudCount = db.prepare('SELECT COUNT(*) c FROM documents').get().c;
+  if (cloudCount) rooms.push({ name: CLOUD, count: cloudCount, virtual: true });
+  return rooms;
+}
+
+// Les compteurs de genre couvrent tout le catalogue : une seule pièce de plus ne
+// doit pas donner deux totaux différents selon la page qu'on regarde.
 function getGenres() {
-  const counts = new Map(
-    db.prepare('SELECT genre, COUNT(*) c FROM books GROUP BY genre').all()
-      .map((r) => [r.genre, r.c]),
-  );
+  const counts = new Map();
+  const add = (genre, n) => counts.set(genre, (counts.get(genre) || 0) + n);
+  for (const r of db.prepare('SELECT genre, COUNT(*) c FROM books GROUP BY genre').all()) add(r.genre, r.c);
+  for (const r of db.prepare('SELECT genre, COUNT(*) c FROM documents GROUP BY genre').all()) add(r.genre, r.c);
   const catalog = GENRES.map((g) => ({ ...g, count: counts.get(g.value) || 0 }));
   const noGenreCount = counts.get(null) || 0;
   return { genres: catalog, no_genre_count: noGenreCount };
@@ -428,7 +489,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'books') {
     const query = Object.fromEntries(url.searchParams.entries());
-    return sendJson(res, 200, listBooks(query));
+    return sendJson(res, 200, listCatalog(query));
   }
 
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'libraries') {
@@ -751,23 +812,33 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
     }
-    const ids = Array.isArray(payload.ids) ? payload.ids.map(Number).filter(Number.isInteger) : [];
+    const { books: ids, documents: docIds } = splitUids(payload.ids);
     const library = payload.library ? String(payload.library).trim() : '';
-    if (!ids.length) return sendJson(res, 400, { error: 'No book selected.' });
+    if (!ids.length && !docIds.length) return sendJson(res, 400, { error: 'No book selected.' });
     if (!library) return sendJson(res, 400, { error: 'Destination room missing.' });
 
     const titleStmt = db.prepare('SELECT title FROM books WHERE id = ?');
     const moveStmt = db.prepare('UPDATE books SET library = ? WHERE id = ?');
     const moved = [];
     const failed = [];
+    // Un document du cloud n'a pas de place physique : le déplacer vers une
+    // pièce n'aurait aucun sens, on le signale au lieu de l'ignorer.
+    for (const docId of docIds) {
+      const row = db.prepare('SELECT title FROM documents WHERE id = ?').get(docId);
+      failed.push({
+        id: `d${docId}`,
+        title: row ? row.title : null,
+        error: 'A cloud document has no physical room.',
+      });
+    }
     for (const id of ids) {
       try {
         moveStmt.run(library, id);
-        moved.push(id);
+        moved.push(`b${id}`);
       } catch {
         const row = titleStmt.get(id);
         failed.push({
-          id,
+          id: `b${id}`,
           title: row ? row.title : null,
           error: `Another book in "${library}" already has the same import identifier (duplicate conflict).`,
         });
@@ -784,13 +855,21 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
     }
-    const ids = Array.isArray(payload.ids) ? payload.ids.map(Number).filter(Number.isInteger) : [];
+    const { books: ids, documents: docIds } = splitUids(payload.ids);
     const genre = payload.genre ? String(payload.genre).trim() || null : null;
-    if (!ids.length) return sendJson(res, 400, { error: 'No book selected.' });
+    if (!ids.length && !docIds.length) return sendJson(res, 400, { error: 'No book selected.' });
 
+    // Le genre est une notion commune aux deux collections : elle s'applique
+    // indifféremment à une fiche papier et à un document.
     const setGenreStmt = db.prepare('UPDATE books SET genre = ? WHERE id = ?');
     for (const id of ids) setGenreStmt.run(genre, id);
-    return sendJson(res, 200, { ok: true, count: ids.length, updated: ids });
+    const setDocGenreStmt = db.prepare("UPDATE documents SET genre = ?, updated_at = datetime('now') WHERE id = ?");
+    for (const id of docIds) setDocGenreStmt.run(genre, id);
+    return sendJson(res, 200, {
+      ok: true,
+      count: ids.length + docIds.length,
+      updated: [...ids.map((i) => `b${i}`), ...docIds.map((i) => `d${i}`)],
+    });
   }
 
   if (req.method === 'DELETE' && parts.length === 3 && parts[1] === 'books') {

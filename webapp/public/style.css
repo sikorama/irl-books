@@ -695,3 +695,14 @@ form .form-grid { display: flex; gap: 1.2rem; flex-wrap: wrap; }
   flex-wrap: wrap;
   gap: 0.4rem 0.8rem;
 }
+
+/* Une carte de document dans le catalogue mixte : même gabarit qu'une fiche
+   papier, mais la couverture est un rendu de page 1 (proportions A4) et le
+   recadrage couperait le titre — souvent la seule métadonnée fiable. */
+.card.doc-card .cover-wrap { aspect-ratio: 1 / 1.414; }
+.card.doc-card img { object-fit: contain; background: var(--bg); }
+
+/* La pastille de pièce d'un document n'ouvre pas le sélecteur de pièce : on ne
+   déménage pas un fichier dans le Grenier. Elle reste donc inerte au survol. */
+.badge.location.cloud { cursor: default; }
+.badge.location.cloud:hover { filter: none; }

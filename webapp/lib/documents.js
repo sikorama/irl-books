@@ -47,6 +47,37 @@ function rowToDocument(row) {
   };
 }
 
+// Le cloud est une pièce du catalogue comme le Grand Bureau ou le Grenier : un
+// document et un livre papier doivent pouvoir cohabiter dans la même grille.
+// Cette projection est le plus petit dénominateur commun des deux — juste ce
+// qu'une carte affiche. Le détail, lui, reste spécifique à chaque type.
+//
+// `uid` existe parce que les deux tables ont leur propre AUTOINCREMENT : le
+// livre 42 et le document 42 existent tous les deux. Le client a besoin d'une
+// identité qui ne collisionne pas pour la sélection multiple, alors que `id`
+// reste l'identifiant local utilisé dans les URL d'API.
+const CLOUD_ROOM = 'cloud';
+
+function toCatalogEntry(doc) {
+  return {
+    uid: `d${doc.id}`,
+    kind: 'document',
+    id: doc.id,
+    library: CLOUD_ROOM,
+    title: doc.title,
+    authors: doc.authors,
+    isbn: doc.isbn,
+    genre: doc.genre,
+    has_cover: doc.has_cover,
+    cover_url: `/api/documents/${doc.id}/cover`,
+    loaned: false,
+    format: doc.format,
+    size: doc.size,
+    pub_year: doc.pub_year,
+    missing_count: doc.missing_count,
+  };
+}
+
 const SORTS = {
   title: 'title COLLATE NOCASE ASC',
   added: 'created_at DESC, id DESC',
@@ -322,6 +353,6 @@ function sendFile(req, res, abs, { contentType, filename, download = false } = {
 }
 
 module.exports = {
-  listDocuments, getDocument, getFacets, updateDocument,
-  coverPath, filePath, sendFile, resolveInLibrary, FILE_TYPES,
+  listDocuments, getDocument, getFacets, updateDocument, toCatalogEntry,
+  coverPath, filePath, sendFile, resolveInLibrary, FILE_TYPES, CLOUD_ROOM,
 };

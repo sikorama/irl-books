@@ -57,7 +57,9 @@
 
   async function loadLibraries() {
     const res = await fetch('/api/libraries');
-    const libs = await res.json();
+    const libs = (await res.json()).filter((lib) => !lib.virtual);
+    // Le cloud est une pièce virtuelle : la renommer ne toucherait aucune fiche
+    // papier, donc elle n'a rien à faire dans l'outil de renommage en masse.
     renderCurrentRoom(libs);
     librariesList.innerHTML = '';
     for (const lib of libs) {
