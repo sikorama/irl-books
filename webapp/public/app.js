@@ -28,6 +28,7 @@
   const isbnInput = document.getElementById('isbn-input');
   const isbnLookupBtn = document.getElementById('isbn-lookup-btn');
   const isbnLookupStatus = document.getElementById('isbn-lookup-status');
+  const isbnGoogleBtn = document.getElementById('isbn-google-btn');
   const isbnScanBtn = document.getElementById('isbn-scan-btn');
   const scanOverlay = document.getElementById('scan-overlay');
   const scanVideo = document.getElementById('scan-video');
@@ -95,6 +96,34 @@
       + '<option value="__none__">No genre</option>'
       + genreOptionsHtml(null, { includeEmpty: false });
     genreTargetSelect.value = currentGenreTarget;
+  }
+
+  let audioCtx = null;
+  const BEEP_PATTERNS = {
+    scan: [{ freq: 1800, start: 0, dur: 0.07 }],
+    success: [{ freq: 880, start: 0, dur: 0.09 }, { freq: 1320, start: 0.1, dur: 0.14 }],
+    fail: [{ freq: 320, start: 0, dur: 0.16 }, { freq: 200, start: 0.15, dur: 0.24 }],
+  };
+  function beep(kind) {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = audioCtx;
+      const now = ctx.currentTime;
+      for (const note of BEEP_PATTERNS[kind] || []) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = note.freq;
+        osc.connect(gain).connect(ctx.destination);
+        gain.gain.setValueAtTime(0.15, now + note.start);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + note.start + note.dur);
+        osc.start(now + note.start);
+        osc.stop(now + note.start + note.dur + 0.02);
+      }
+    } catch {
+      // Audio feedback is a nicety — autoplay restrictions or missing
+      // AudioContext support shouldn't block the actual scan/lookup flow.
+    }
   }
 
   function escapeHtml(s) {
@@ -418,17 +447,19 @@
       .join('');
     detailContent.innerHTML = `
       <div class="detail-layout">
-        <label class="cover-edit">
-          <input type="file" accept="image/*" class="cover-edit-input">
-          <img class="cover" src="/api/books/${book.id}/cover" alt="${escapeHtml(book.title)}">
-          <span class="cover-edit-hint">Change cover</span>
-        </label>
+        <div class="cover-col">
+          <label class="cover-edit">
+            <input type="file" accept="image/*" class="cover-edit-input">
+            <img class="cover" src="/api/books/${book.id}/cover" alt="${escapeHtml(book.title)}">
+            <span class="cover-edit-hint">Change cover</span>
+          </label>
+          <div class="cover-search-actions">
+            <button type="button" class="secondary icon-btn image-search-btn" title="Search for cover images">🔍</button>
+            <button type="button" class="secondary icon-btn google-search-btn" title="Search Google Images">🌐</button>
+          </div>
+        </div>
         <div class="detail-fields">
-          ${fieldRow('Title', `
-            <div class="isbn-row">
-              <input type="text" class="field-input" data-field="title" value="${escapeHtml(book.title)}">
-              <button type="button" class="secondary icon-btn google-search-btn" title="Search Google Images">🔍</button>
-            </div>`, { full: true })}
+          ${fieldRow('Title', `<input type="text" class="field-input" data-field="title" value="${escapeHtml(book.title)}">`, { full: true })}
           ${fieldRow('Author(s)', `<input type="text" class="field-input" data-field="authors" value="${escapeHtml(book.authors.join(', '))}">`, { full: true })}
           ${fieldRow('Room', `<select class="field-input" data-field="library">${libraryOptions}</select>`)}
           ${fieldRow('Genre', `<select class="field-input" data-field="genre">${genreOptionsHtml(book.genre)}</select>`)}
@@ -440,6 +471,7 @@
               <input type="text" class="field-input" data-field="isbn" inputmode="numeric" value="${escapeHtml(book.isbn || '')}">
               <button type="button" class="secondary icon-btn isbn-scan-detail-btn" title="Scan the barcode">📷</button>
               <button type="button" class="secondary icon-btn isbn-lookup-detail-btn" title="Look up">🔎</button>
+              <button type="button" class="secondary icon-btn isbn-google-detail-btn hidden" title="Search Google for this ISBN">🌐</button>
             </div>`, { full: true })}
           ${fieldRow('Loaned', `
             <div class="loaned-row">
@@ -451,6 +483,7 @@
           <p class="cover-upload-error error"></p>
         </div>
       </div>
+      <div class="image-search-results hidden"></div>
     `;
 
     const statusEl = detailContent.querySelector('.field-save-status');
@@ -479,6 +512,61 @@
       }
     }
 
+    const imageSearchBtn = detailContent.querySelector('.image-search-btn');
+    const imageSearchResults = detailContent.querySelector('.image-search-results');
+
+    function closeImageSearch() {
+      imageSearchResults.classList.add('hidden');
+      imageSearchResults.innerHTML = '';
+    }
+
+    async function setCoverFromSearch(cover_base64) {
+      await fetch(`/api/books/${book.id}/cover`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cover_base64 }),
+      });
+      coverImg.src = `/api/books/${book.id}/cover?t=${Date.now()}`;
+      await loadBooks();
+      closeImageSearch();
+    }
+
+    imageSearchBtn.addEventListener('click', async () => {
+      const titleVal = detailContent.querySelector('[data-field="title"]').value;
+      const authorsVal = detailContent.querySelector('[data-field="authors"]').value;
+      const query = [titleVal, authorsVal].filter(Boolean).join(' ');
+      if (!query.trim()) return;
+
+      imageSearchBtn.disabled = true;
+      imageSearchResults.classList.remove('hidden');
+      imageSearchResults.innerHTML = '<p class="image-search-status">Searching…</p>';
+      try {
+        const res = await fetch(`/api/image-search?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (!data.results || !data.results.length) {
+          imageSearchResults.innerHTML = '<p class="image-search-status">No results found.</p>';
+          return;
+        }
+        imageSearchResults.innerHTML = `
+          <div class="image-search-grid">
+            ${data.results.map((r, i) => `
+              <button type="button" class="image-search-thumb" data-index="${i}" title="${escapeHtml(r.title || '')}">
+                <img src="${r.cover_base64}" alt="${escapeHtml(r.title || '')}">
+              </button>`).join('')}
+          </div>
+          <button type="button" class="secondary image-search-close">None of these</button>
+        `;
+        imageSearchResults.querySelectorAll('.image-search-thumb').forEach((btn) => {
+          btn.addEventListener('click', () => setCoverFromSearch(data.results[Number(btn.dataset.index)].cover_base64));
+        });
+        imageSearchResults.querySelector('.image-search-close').addEventListener('click', closeImageSearch);
+      } catch (err) {
+        imageSearchResults.innerHTML = `<p class="image-search-status error">${escapeHtml(err.message)}</p>`;
+      } finally {
+        imageSearchBtn.disabled = false;
+      }
+    });
+
     detailContent.querySelector('.google-search-btn').addEventListener('click', () => {
       const titleVal = detailContent.querySelector('[data-field="title"]').value;
       const authorsVal = detailContent.querySelector('[data-field="authors"]').value;
@@ -498,16 +586,30 @@
       });
     });
 
+    const isbnGoogleDetailBtn = detailContent.querySelector('.isbn-google-detail-btn');
+    isbnGoogleDetailBtn.addEventListener('click', () => {
+      const isbn = detailContent.querySelector('[data-field="isbn"]').value.trim();
+      if (!isbn) return;
+      window.open(`https://www.google.com/search?q=${encodeURIComponent(isbn)}`, '_blank', 'noopener');
+    });
+
+    let detailIsbnLookupSeq = 0;
     detailContent.querySelector('.isbn-lookup-detail-btn').addEventListener('click', async () => {
       const isbnField = detailContent.querySelector('[data-field="isbn"]');
       const isbn = isbnField.value.trim();
       if (!isbn) return;
+      const seq = ++detailIsbnLookupSeq;
+      isbnGoogleDetailBtn.classList.add('hidden');
       statusEl.textContent = 'Looking up…';
       try {
         const res = await fetch(`/api/isbn-lookup/${encodeURIComponent(isbn)}`);
         const data = await res.json();
+        if (seq !== detailIsbnLookupSeq) return; // a newer lookup has since started — don't show a stale result
+
         if (!data.found) {
+          beep('fail');
           statusEl.textContent = 'No result found for this ISBN.';
+          isbnGoogleDetailBtn.classList.remove('hidden');
           return;
         }
         const patch = {};
@@ -515,7 +617,31 @@
         if (data.authors && data.authors.length) patch.authors = data.authors;
         if (data.publisher) patch.publisher = data.publisher;
         if (data.publishing_year) patch.publishing_year = data.publishing_year;
-        await saveField(patch);
+
+        const FIELD_LABELS = { title: 'Title', authors: 'Author(s)', publisher: 'Publisher', publishing_year: 'Year' };
+        const asText = (v) => (Array.isArray(v) ? v.join(', ') : (v ?? ''));
+        const overwrites = [];
+        for (const [field, newValue] of Object.entries(patch)) {
+          const currentText = asText(book[field]);
+          if (asText(newValue) === currentText) {
+            delete patch[field];
+          } else if (currentText !== '') {
+            overwrites.push(`${FIELD_LABELS[field]}: "${currentText}" → "${asText(newValue)}"`);
+          }
+        }
+        const overwritesCover = Boolean(data.cover_base64 && book.has_cover);
+
+        if (overwrites.length || overwritesCover) {
+          const details = overwrites.slice();
+          if (overwritesCover) details.push('Cover image will be replaced');
+          const ok = confirm(`The lookup returned different values for fields that already have data:\n\n${details.join('\n')}\n\nOverwrite them?`);
+          if (!ok) {
+            statusEl.textContent = 'Lookup cancelled — no changes saved.';
+            return;
+          }
+        }
+
+        if (Object.keys(patch).length) await saveField(patch);
 
         if (patch.title) detailContent.querySelector('[data-field="title"]').value = patch.title;
         if (patch.authors) detailContent.querySelector('[data-field="authors"]').value = patch.authors.join(', ');
@@ -531,9 +657,13 @@
           coverImg.src = `/api/books/${book.id}/cover?t=${Date.now()}`;
           await loadBooks();
         }
-        statusEl.textContent = 'Fields updated from Open Library ✓';
+        beep('success');
+        statusEl.textContent = 'Fields updated ✓';
       } catch (err) {
+        if (seq !== detailIsbnLookupSeq) return;
+        beep('fail');
         statusEl.textContent = err.message;
+        isbnGoogleDetailBtn.classList.remove('hidden');
       }
     });
 
@@ -643,6 +773,7 @@
       return;
     }
 
+    let handled = false;
     try {
       if (!zxingReader) {
         const hints = new Map();
@@ -655,9 +786,14 @@
         { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } },
         scanVideo,
         (result) => {
-          if (!result) return;
+          // ZXing can fire this callback for several consecutive frames matching
+          // the same barcode before reset() actually stops the stream — only
+          // act on the first one.
+          if (!result || handled) return;
+          handled = true;
           const code = result.getText();
           scanStatus.textContent = `Detected: ${code}`;
+          beep('scan');
           stopScanner();
           onDecoded(code);
         },
@@ -750,20 +886,29 @@
     if (e.target === duplicateOverlay) ignoreDuplicate();
   });
 
+  let isbnLookupSeq = 0;
   async function lookupIsbn() {
     const isbn = isbnInput.value.trim();
     if (!isbn) return;
+    const seq = ++isbnLookupSeq;
     isbnLookupBtn.disabled = true;
+    isbnGoogleBtn.classList.add('hidden');
+    isbnGoogleBtn.dataset.isbn = isbn;
     isbnLookupStatus.textContent = 'Looking up…';
     try {
       const res = await fetch(`/api/isbn-lookup/${encodeURIComponent(isbn)}`);
       const data = await res.json();
+      if (seq !== isbnLookupSeq) return; // a newer lookup has since started — don't show a stale result
+
       if (data.existing) {
+        beep('success');
         await handleExistingBook(data.existing);
         return;
       }
       if (!data.found) {
+        beep('fail');
         isbnLookupStatus.textContent = 'No result found for this ISBN.';
+        isbnGoogleBtn.classList.remove('hidden');
         return;
       }
       if (data.title) addForm.elements.title.value = data.title;
@@ -774,16 +919,25 @@
         coverPreview.src = data.cover_base64;
         coverPreview.dataset.base64 = data.cover_base64;
       }
+      beep('success');
       isbnLookupStatus.textContent = 'Found ✓ — check and complete before saving.';
     } catch (err) {
+      if (seq !== isbnLookupSeq) return;
+      beep('fail');
       isbnLookupStatus.textContent = `Error: ${err.message}`;
+      isbnGoogleBtn.classList.remove('hidden');
     } finally {
-      isbnLookupBtn.disabled = false;
+      if (seq === isbnLookupSeq) isbnLookupBtn.disabled = false;
     }
   }
   isbnLookupBtn.addEventListener('click', lookupIsbn);
   isbnInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); lookupIsbn(); }
+  });
+  isbnGoogleBtn.addEventListener('click', () => {
+    const isbn = isbnGoogleBtn.dataset.isbn || isbnInput.value.trim();
+    if (!isbn) return;
+    window.open(`https://www.google.com/search?q=${encodeURIComponent(isbn)}`, '_blank', 'noopener');
   });
 
   coverInput.addEventListener('change', () => {
@@ -858,5 +1012,14 @@
     }
   });
 
-  Promise.all([loadLibraries(), loadGenres()]).then(loadBooks);
+  Promise.all([loadLibraries(), loadGenres()]).then(loadBooks).then(() => {
+    const params = new URLSearchParams(window.location.search);
+    const openBookId = params.get('openBook');
+    if (openBookId) {
+      openDetail(Number(openBookId));
+      params.delete('openBook');
+      const query = params.toString();
+      window.history.replaceState({}, '', window.location.pathname + (query ? `?${query}` : ''));
+    }
+  });
 })();

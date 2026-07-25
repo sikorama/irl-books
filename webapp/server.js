@@ -9,6 +9,16 @@ const { openDb } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
 const { GENRES, guessGenre } = require('./lib/categorize.js');
 
+// Usage: node server.js [--http]
+function parseArgs() {
+  const args = { forceHttp: false };
+  for (const arg of process.argv.slice(2)) {
+    if (arg === '--http') args.forceHttp = true;
+  }
+  return args;
+}
+const ARGS = parseArgs();
+
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8321;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const CERT_FILE = path.join(__dirname, 'certs', 'cert.pem');
@@ -236,43 +246,103 @@ function exportCalibre() {
   return { count, path: EXPORT_DIR };
 }
 
-async function lookupIsbn(isbn) {
-  const cleanIsbn = String(isbn).replace(/[^0-9Xx]/g, '');
-  if (!cleanIsbn) return { found: false };
+async function fetchCoverBase64(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 100) return null;
+    return `data:image/jpeg;base64,${buf.toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
 
+async function lookupIsbnOpenLibrary(cleanIsbn) {
   const res = await fetch(
     `https://openlibrary.org/api/books?bibkeys=ISBN:${encodeURIComponent(cleanIsbn)}&format=json&jscmd=data`,
   );
-  if (!res.ok) return { found: false };
+  if (!res.ok) return null;
   const data = await res.json();
   const entry = data[`ISBN:${cleanIsbn}`];
-  if (!entry) return { found: false };
+  if (!entry) return null;
 
   const yearMatch = /\d{4}/.exec(entry.publish_date || '');
-
-  let coverBase64 = null;
-  if (entry.cover && entry.cover.large) {
-    try {
-      const coverRes = await fetch(entry.cover.large);
-      if (coverRes.ok) {
-        const buf = Buffer.from(await coverRes.arrayBuffer());
-        if (buf.length > 100) {
-          coverBase64 = `data:image/jpeg;base64,${buf.toString('base64')}`;
-        }
-      }
-    } catch {
-      // Cover fetch failing shouldn't block the rest of the metadata.
-    }
-  }
+  const coverBase64 = entry.cover && entry.cover.large ? await fetchCoverBase64(entry.cover.large) : null;
 
   return {
-    found: true,
     title: [entry.title, entry.subtitle].filter(Boolean).join(' : '),
     authors: (entry.authors || []).map((a) => a.name),
     publisher: (entry.publishers || []).map((p) => p.name).join(', ') || null,
     publishing_year: yearMatch ? Number(yearMatch[0]) : null,
     cover_base64: coverBase64,
   };
+}
+
+async function lookupIsbnGoogleBooks(cleanIsbn) {
+  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(cleanIsbn)}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const item = Array.isArray(data.items) ? data.items[0] : null;
+  if (!item) return null;
+  const info = item.volumeInfo || {};
+
+  const thumb = info.imageLinks && (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail);
+  const coverBase64 = thumb ? await fetchCoverBase64(thumb.replace(/^http:/, 'https:')) : null;
+  const yearMatch = /\d{4}/.exec(info.publishedDate || '');
+
+  return {
+    title: info.title || null,
+    authors: info.authors || [],
+    publisher: info.publisher || null,
+    publishing_year: yearMatch ? Number(yearMatch[0]) : null,
+    cover_base64: coverBase64,
+  };
+}
+
+async function lookupIsbn(isbn) {
+  const cleanIsbn = String(isbn).replace(/[^0-9Xx]/g, '');
+  if (!cleanIsbn) return { found: false };
+
+  // Open Library is tried first (better metadata quality); Google Books is a
+  // fallback for editions/ISBNs it doesn't have.
+  const result = (await lookupIsbnOpenLibrary(cleanIsbn)) || (await lookupIsbnGoogleBooks(cleanIsbn));
+  if (!result) return { found: false };
+  return { found: true, ...result };
+}
+
+async function imageSearch(query) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+
+  const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=20&printType=books`);
+  if (!res.ok) throw new Error(`Google Books API returned ${res.status}`);
+  const data = await res.json();
+  const items = Array.isArray(data.items) ? data.items : [];
+
+  const results = [];
+  for (const item of items) {
+    if (results.length >= 5) break;
+    const info = item.volumeInfo || {};
+    const links = info.imageLinks;
+    const thumb = links && (links.thumbnail || links.smallThumbnail);
+    if (!thumb) continue;
+    const imgUrl = thumb.replace(/^http:/, 'https:').replace('zoom=1', 'zoom=2');
+    try {
+      const imgRes = await fetch(imgUrl);
+      if (!imgRes.ok) continue;
+      const buf = Buffer.from(await imgRes.arrayBuffer());
+      if (buf.length < 100) continue;
+      results.push({
+        title: info.title || null,
+        authors: info.authors || [],
+        cover_base64: `data:image/jpeg;base64,${buf.toString('base64')}`,
+      });
+    } catch {
+      // Skip images that fail to download; the rest of the search still stands.
+    }
+  }
+  return results;
 }
 
 function serveStatic(req, res, urlPath) {
@@ -353,6 +423,15 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { ok: true, count: result.count, path: result.path });
     } catch (e) {
       return sendJson(res, 500, { error: `Export failed: ${e.message}` });
+    }
+  }
+
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'image-search') {
+    try {
+      const results = await imageSearch(url.searchParams.get('q'));
+      return sendJson(res, 200, { results });
+    } catch (e) {
+      return sendJson(res, 502, { results: [], error: `Search failed: ${e.message}` });
     }
   }
 
@@ -618,8 +697,9 @@ async function requestHandler(req, res) {
 }
 
 const hasCert = fs.existsSync(CERT_FILE) && fs.existsSync(KEY_FILE);
-const protocol = hasCert ? 'https' : 'http';
-const server = hasCert
+const useHttps = hasCert && !ARGS.forceHttp;
+const protocol = useHttps ? 'https' : 'http';
+const server = useHttps
   ? https.createServer({ cert: fs.readFileSync(CERT_FILE), key: fs.readFileSync(KEY_FILE) }, requestHandler)
   : http.createServer(requestHandler);
 
@@ -638,7 +718,12 @@ server.listen(PORT, () => {
   for (const addr of localNetworkAddresses()) {
     console.log(`  reachable on the network: ${protocol}://${addr}:${PORT}`);
   }
-  if (!hasCert) {
-    console.log('(HTTPS disabled: run `node gen-cert.js` then restart the server to enable it — required for camera barcode scanning from a phone.)');
+  if (!useHttps) {
+    if (ARGS.forceHttp && hasCert) {
+      console.log('(HTTPS forced off via --http.)');
+    } else {
+      console.log('(HTTPS disabled: run `node gen-cert.js` then restart the server to enable it.)');
+    }
+    console.log('WARNING: running over plain HTTP — camera barcode scanning will not work on phones/other devices (only `localhost` is exempt from the secure-context requirement).');
   }
 });

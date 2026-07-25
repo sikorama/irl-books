@@ -118,7 +118,7 @@
         el.innerHTML = `
           <img src="/api/books/${entry.id}/cover" alt="">
           <div class="dup-info">
-            <p class="dup-title">${escapeHtml(entry.title)}</p>
+            <p class="dup-title"><a href="/?openBook=${entry.id}" title="Open this book's details">${escapeHtml(entry.title)}</a></p>
             <p class="dup-meta">${escapeHtml(entry.library || 'Unknown room')} · #${entry.id}</p>
           </div>
           <button data-id="${entry.id}" class="icon-btn" title="Delete">🗑️</button>
