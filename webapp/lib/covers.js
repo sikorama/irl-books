@@ -11,6 +11,7 @@
 const { imageSize } = require('./image.js');
 const {
   fetchCoverImage, googleBooksCover, openLibraryCoverUrl, cleanIsbn, isbnVariants, googleBooksPaused,
+  describeError,
 } = require('./lookup.js');
 
 const DEFAULT_MIN_WIDTH = 400;
@@ -97,7 +98,7 @@ async function upgradeCovers(db, options = {}) {
   const sourceErrors = new Map();
   const noteSourceError = (source, err) => {
     sourceErrors.set(source, (sourceErrors.get(source) || 0) + 1);
-    if (sourceErrors.get(source) === 1) console.warn(`[covers] ${source} indisponible : ${err.message}`);
+    if (sourceErrors.get(source) === 1) console.warn(`[covers] ${source} indisponible : ${describeError(err)}`);
   };
 
   for (const book of candidates) {
@@ -116,7 +117,7 @@ async function upgradeCovers(db, options = {}) {
       }
     } catch (e) {
       event.status = 'failed';
-      event.error = e.message;
+      event.error = describeError(e);
       totals.failed++;
     }
 

@@ -41,6 +41,15 @@ const GOOGLE_BOOKS_KEY = process.env.GOOGLE_BOOKS_KEY || '';
 // problème.
 const GOOGLE_BOOKS_COUNTRY = process.env.GOOGLE_BOOKS_COUNTRY || 'FR';
 
+// undici résume toute panne réseau en « fetch failed » et range le motif réel
+// dans `cause` : sans ça, un DNS cassé, un port fermé et un certificat refusé
+// sont indiscernables dans l'interface.
+function describeError(e) {
+  if (!e) return 'erreur inconnue';
+  const detail = e.cause && (e.cause.message || e.cause.code);
+  return detail ? `${e.message} (${detail})` : e.message;
+}
+
 async function httpGet(url, { timeout = TIMEOUT_MS, accept, retries = 1 } = {}) {
   const headers = { 'User-Agent': USER_AGENT };
   if (accept) headers.Accept = accept;
@@ -308,7 +317,7 @@ async function runSource(name, fn) {
   try {
     return await fn();
   } catch (e) {
-    console.warn(`[isbn] ${name} indisponible : ${e.message}`);
+    console.warn(`[isbn] ${name} indisponible : ${describeError(e)}`);
     return null;
   }
 }
@@ -484,7 +493,7 @@ async function imageSearchStream({ title, authors, isbn }, emit) {
       await fn();
       emit({ type: 'source', name, state: 'done' });
     } catch (e) {
-      emit({ type: 'source', name, state: 'error', message: e.message });
+      emit({ type: 'source', name, state: 'error', message: describeError(e) });
     }
   }));
   emit({ type: 'done' });
@@ -506,6 +515,7 @@ module.exports = {
   googleBooksCover,
   openLibraryCoverUrl,
   cleanIsbn,
+  describeError,
   isbnVariants,
   googleBooksPaused,
   hasGoogleBooksKey: () => Boolean(GOOGLE_BOOKS_KEY),

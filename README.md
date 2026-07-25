@@ -145,6 +145,23 @@ room makes that one current instead — the setting seeds the default, it doesn'
 lock it. It's stored per device (browser `localStorage`), so a phone and a
 desktop each keep their own.
 
+### Diagnosing "fetch failed" / unexplained 5xx
+
+Every outbound host the app uses can be probed from wherever the server really
+runs — which is the only place that matters when it works from your laptop but
+not from the container:
+
+```bash
+node net-check.js                                   # locally
+docker compose exec <service> node irl-books/net-check.js
+```
+
+It prints, per source, the resolved IP addresses, the HTTP status and the exact
+network error, then explains how to read the failures. `fetch failed` on its own
+is undici's generic wrapper; the real reason (`ENOTFOUND`, `ECONNRESET`,
+`ECONNREFUSED`, a TLS error…) lives in its `cause`, which the app now surfaces
+everywhere instead of swallowing.
+
 ## Maintenance scripts
 
 Both are safe to re-run: they only ever touch books that still need something.
