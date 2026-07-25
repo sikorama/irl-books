@@ -5,11 +5,12 @@ const https = require('https');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { openDb } = require('./lib/db.js');
+const { openDb, LIBRARY_ROOT } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
 const { GENRES, guessGenre } = require('./lib/categorize.js');
 const { lookupIsbn, imageSearchStream, hasGoogleBooksKey, describeGoogleBooksKey } = require('./lib/lookup.js');
 const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
+const documents = require('./lib/documents.js');
 
 // Usage: node server.js [--http]
 function parseArgs() {
@@ -329,8 +330,101 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
+// --- Collection numérique -------------------------------------------------
+//
+// Les documents forment une collection à part : corpus disjoint des fiches
+// papier, colonnes différentes, filtres différents. Seul le socle (grille,
+// recherche, genres) est commun.
+
+async function handleDocumentsApi(req, res, url, parts) {
+  // GET /api/documents
+  if (req.method === 'GET' && parts.length === 2) {
+    const query = Object.fromEntries(url.searchParams.entries());
+    return sendJson(res, 200, documents.listDocuments(db, query));
+  }
+
+  // GET /api/documents/facets
+  if (req.method === 'GET' && parts.length === 3 && parts[2] === 'facets') {
+    return sendJson(res, 200, { ...documents.getFacets(db), library_root: LIBRARY_ROOT });
+  }
+
+  // POST /api/documents/set-genre
+  if (req.method === 'POST' && parts.length === 3 && parts[2] === 'set-genre') {
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch (e) {
+      return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+    }
+    const ids = Array.isArray(payload.ids) ? payload.ids.map(Number).filter(Number.isInteger) : [];
+    const genre = payload.genre ? String(payload.genre).trim() || null : null;
+    if (!ids.length) return sendJson(res, 400, { error: 'No document selected.' });
+    const stmt = db.prepare("UPDATE documents SET genre = ?, updated_at = datetime('now') WHERE id = ?");
+    for (const id of ids) stmt.run(genre, id);
+    return sendJson(res, 200, { ok: true, count: ids.length, updated: ids });
+  }
+
+  // GET /api/documents/:id/cover
+  if (req.method === 'GET' && parts.length === 4 && parts[3] === 'cover') {
+    const abs = documents.coverPath(db, LIBRARY_ROOT, Number(parts[2]));
+    if (!abs) {
+      // Pas de cover.jpg : la vignette générique. Elle est prise dans `public/`
+      // et non dans `db-alexandria/`, que .dockerignore exclut de l'image —
+      // sinon les 117 documents sans couverture renverraient un 404 en Docker.
+      return fs.readFile(path.join(PUBLIC_DIR, 'nocover.jpg'), (err, data) => {
+        if (err) { res.writeHead(404); return res.end(); }
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-cache' });
+        res.end(data);
+      });
+    }
+    return documents.sendFile(req, res, abs, {
+      contentType: 'image/jpeg',
+      filename: 'cover.jpg',
+    });
+  }
+
+  // GET /api/documents/:id/file[?format=PDF][&download=1]
+  if (req.method === 'GET' && parts.length === 4 && parts[3] === 'file') {
+    const id = Number(parts[2]);
+    const file = documents.filePath(db, LIBRARY_ROOT, id, url.searchParams.get('format'));
+    if (!file) return sendJson(res, 404, { error: 'No such file for this document' });
+    return documents.sendFile(req, res, file.abs, {
+      contentType: documents.FILE_TYPES[file.format],
+      filename: file.name,
+      download: url.searchParams.get('download') === '1',
+    });
+  }
+
+  // GET /api/documents/:id
+  if (req.method === 'GET' && parts.length === 3) {
+    const doc = documents.getDocument(db, Number(parts[2]));
+    if (!doc) return sendJson(res, 404, { error: 'not found' });
+    return sendJson(res, 200, doc);
+  }
+
+  // PATCH /api/documents/:id
+  if (req.method === 'PATCH' && parts.length === 3) {
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch (e) {
+      return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+    }
+    const result = documents.updateDocument(db, Number(parts[2]), payload);
+    if (!result) return sendJson(res, 404, { error: 'not found' });
+    if (result.error) return sendJson(res, 400, { error: result.error });
+    return sendJson(res, 200, result.document);
+  }
+
+  return sendJson(res, 404, { error: 'Unknown route' });
+}
+
 async function handleApi(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
+
+  if (parts[1] === 'documents') {
+    return handleDocumentsApi(req, res, url, parts);
+  }
 
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'books') {
     const query = Object.fromEntries(url.searchParams.entries());

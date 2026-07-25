@@ -2,8 +2,17 @@
 
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const { ensureDocumentsSchema } = require('./docs-db.js');
 
-const DB_PATH = path.join(__dirname, '..', 'library.db');
+const DB_PATH = process.env.LIBRARY_DB
+  ? path.resolve(process.env.LIBRARY_DB)
+  : path.join(__dirname, '..', 'library.db');
+
+// Racine de la bibliothèque numérique : l'arborescence Calibre
+// (`<racine>/<Auteur>/<Titre> (<id>)/`) montée en volume. La base ne stocke que
+// des chemins relatifs à cette racine, pour qu'un déplacement du volume ne
+// demande aucune migration.
+const LIBRARY_ROOT = process.env.LIBRARY_ROOT || '/library';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS books (
@@ -55,7 +64,8 @@ function openDb() {
   const db = new DatabaseSync(DB_PATH);
   db.exec(SCHEMA);
   migrate(db);
+  ensureDocumentsSchema(db);
   return db;
 }
 
-module.exports = { openDb, DB_PATH };
+module.exports = { openDb, DB_PATH, LIBRARY_ROOT };

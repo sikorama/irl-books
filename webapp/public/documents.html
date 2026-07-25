@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alexandria — Documents</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="documents">
+<header class="topbar">
+  <h1>📄 Documents</h1>
+  <div class="controls">
+    <input id="search" type="search" placeholder="Title, author, series, publisher, tag…">
+    <select id="format-filter">
+      <option value="">All formats</option>
+    </select>
+    <select id="genre-filter">
+      <option value="">All genres</option>
+    </select>
+    <select id="series-filter">
+      <option value="">All series</option>
+    </select>
+    <select id="sort-select" title="Sort">
+      <option value="title">Title</option>
+      <option value="added">Recently added</option>
+      <option value="size">Largest</option>
+      <option value="year">Newest</option>
+      <option value="pages">Most pages</option>
+    </select>
+    <div class="flag-filters">
+      <label title="No cover"><input type="checkbox" data-flag="no_cover"> 🖼️</label>
+      <label title="Unknown author"><input type="checkbox" data-flag="no_author"> 👤</label>
+      <label title="File missing from disk"><input type="checkbox" data-flag="missing"> ⚠️</label>
+    </div>
+    <button id="select-toggle-btn" class="secondary icon-btn" title="Select">☑️</button>
+    <a href="/index.html" class="secondary icon-btn" title="Physical books">📚</a>
+    <a href="/settings.html" class="secondary icon-btn" title="Settings">⚙️</a>
+  </div>
+  <div class="status" id="status"></div>
+</header>
+
+<div id="selection-bar" class="selection-bar hidden">
+  <label title="Select all"><input type="checkbox" id="select-all"> ☑️</label>
+  <span id="selection-count">0 selected</span>
+  <select id="genre-target">
+    <option value="">🏷️ Change genre…</option>
+  </select>
+  <button id="genre-btn" class="primary icon-btn" title="Apply genre" disabled>🏷️</button>
+  <button id="cancel-select-btn" class="secondary icon-btn" title="Cancel">✕</button>
+</div>
+
+<main>
+  <div id="grid" class="grid"></div>
+  <p id="empty" class="empty hidden">No document matches these criteria.</p>
+</main>
+
+<div id="detail-overlay" class="overlay hidden">
+  <div class="modal detail-modal">
+    <button class="close-btn" data-close title="Close">×</button>
+    <div id="detail-content"></div>
+  </div>
+</div>
+
+<div id="quick-genre-overlay" class="overlay hidden">
+  <div class="modal quick-pick-modal">
+    <button class="close-btn" data-close title="Close">×</button>
+    <h2>Genre</h2>
+    <p id="quick-genre-title" class="quick-pick-title"></p>
+    <select id="quick-genre-select"></select>
+    <p id="quick-genre-status" class="quick-pick-status"></p>
+  </div>
+</div>
+
+<script src="/documents.js"></script>
+</body>
+</html>
