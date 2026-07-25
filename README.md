@@ -166,6 +166,11 @@ slow enough to dominate every request.
 (`ENOTFOUND`, `ECONNRESET`, `ECONNREFUSED`, a TLS error…) lives in its `cause`,
 which the app now surfaces everywhere instead of swallowing.
 
+When Google Books alone fails, it additionally replays the same call four ways
+(with/without the key, with/without `country`). A keyed request that 5xx's while
+an unkeyed one gets the usual `429` quota error proves the network and the
+endpoint are fine and the Cloud project behind the key is at fault.
+
 A uniform multi-second floor across unrelated hosts is a resolver problem, not a
 network one. Under Docker, pointing the service at a fast resolver usually fixes
 it outright:

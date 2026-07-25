@@ -99,6 +99,39 @@ function showResolverConfig() {
   console.log('');
 }
 
+// Quand seul Google Books échoue, la question est : est-ce la requête, ou la
+// clé ? Sans clé, l'appel tombe dans le quota anonyme et doit répondre 429 —
+// ce qui prouverait que tout le chemin fonctionne et que seul le projet
+// rattaché à la clé pose problème.
+async function isolateGoogleBooks() {
+  const base = 'https://www.googleapis.com/books/v1/volumes?q=isbn:9782070360024';
+  const variants = [
+    ['key + country', `${base}&country=${COUNTRY}${KEY ? `&key=${KEY}` : ''}`],
+    ['key, no country', `${base}${KEY ? `&key=${KEY}` : ''}`],
+    ['country, NO key', `${base}&country=${COUNTRY}`],
+    ['neither', base],
+  ];
+  console.log('Isolating Google Books (same endpoint, varying the request):');
+  const seen = [];
+  for (const [label, url] of variants) {
+    const r = await request(url, { 'User-Agent': USER_AGENT });
+    console.log(`   ${label.padEnd(16)} -> ${r.text}`);
+    seen.push([label, r.status]);
+  }
+  const keyed = seen.filter(([l]) => l.startsWith('key')).map(([, s]) => s);
+  const unkeyed = seen.filter(([l]) => !l.startsWith('key')).map(([, s]) => s);
+  console.log('');
+  if (KEY && keyed.every((s) => s >= 500) && unkeyed.some((s) => s === 429 || s === 200)) {
+    console.log('   >>> Only the keyed requests fail. The endpoint and the network are fine:');
+    console.log('       the problem is the Cloud project behind this key. Check that "Books API"');
+    console.log('       is enabled on it, look at its Metrics page, or issue a fresh key.');
+  } else if (seen.every(([, s]) => s >= 500)) {
+    console.log('   >>> Every variant fails, key or not. This is Google-side and nothing');
+    console.log('       in the app or your network will change it — the other sources cover for it.');
+  }
+  console.log('');
+}
+
 async function main() {
   console.log(`Node ${process.version} — Google Books key: ${KEY ? `set (…${KEY.slice(-4)})` : 'NOT SET'}, country=${COUNTRY}`);
   console.log('');
@@ -124,6 +157,7 @@ async function main() {
   console.log('');
 
   const bad = results.filter(([, r]) => !r.ok);
+  if (bad.some(([label]) => label.startsWith('Google Books (API)'))) await isolateGoogleBooks();
   if (!bad.length) {
     console.log('Every source is reachable from here.');
     return;
