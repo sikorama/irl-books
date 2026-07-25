@@ -15,6 +15,11 @@
 // jusqu'ici de consulter les autres sources, alors qu'elles avaient l'auteur.
 
 const { sniffImageMime, imageSize, looksLikeCover } = require('./image.js');
+const { searchImages } = require('./ddg-images.js');
+
+// Combien de vignettes proposer, par provenance.
+const CATALOG_RESULTS = 5;
+const WEB_RESULTS = 5;
 
 const USER_AGENT = 'IRL-Books/1.0 (catalogue de bibliothèque personnelle)';
 const TIMEOUT_MS = 8000;
@@ -102,12 +107,18 @@ function isbnVariants(clean) {
 
 // Télécharge une image et la valide sur son contenu, jamais sur l'URL ou le
 // `Content-Type` annoncé. Renvoie { buf, mime, width, height } ou null.
+// Les couvertures des catalogues font quelques dizaines de Ko ; une image
+// trouvée sur le web peut peser plusieurs Mo, et elle finit stockée en base.
+const MAX_COVER_BYTES = 5 * 1024 * 1024;
+
 async function fetchCoverImage(url) {
   try {
     const res = await httpGet(url, { timeout: COVER_TIMEOUT_MS, accept: 'image/*' });
     if (!res.ok) return null;
+    const declared = Number(res.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > MAX_COVER_BYTES) return null;
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 100) return null;
+    if (buf.length < 100 || buf.length > MAX_COVER_BYTES) return null;
     const mime = sniffImageMime(buf);
     if (!mime) return null; // page d'erreur HTML ou format inconnu
     const size = imageSize(buf);
@@ -422,7 +433,29 @@ async function coverSearchByTitle(title, authors, limit, report) {
 
   const covers = await Promise.all(ordered.map((c) => fetchCover(c.cover)));
   return ordered
-    .map((c, i) => ({ title: c.title, authors: c.authors, cover_base64: covers[i] }))
+    .map((c, i) => ({ title: c.title, authors: c.authors, source: 'catalog', cover_base64: covers[i] }))
+    .filter((r) => r.cover_base64)
+    .slice(0, limit);
+}
+
+// Recherche web, proposée en complément parce que les catalogues sont
+// régulièrement indisponibles et ignorent purement et simplement une partie du
+// fonds. Les images ne sont pas rattachées à une édition précise : c'est à
+// l'utilisateur de trancher visuellement, d'où l'étiquette de provenance.
+async function webCoverCandidates(title, authors, limit, report) {
+  const query = [title, authors, 'livre couverture'].filter(Boolean).join(' ').trim();
+  let candidates = [];
+  try {
+    candidates = await searchImages(query, limit + 3);
+    report.ok++;
+  } catch (e) {
+    report.errors.push(`Recherche web: ${e.message}`);
+    return [];
+  }
+
+  const covers = await Promise.all(candidates.map((c) => fetchCover(c.cover)));
+  return candidates
+    .map((c, i) => ({ title: c.title, authors: [], source: c.source, cover_base64: covers[i] }))
     .filter((r) => r.cover_base64)
     .slice(0, limit);
 }
@@ -443,30 +476,41 @@ async function imageSearch({ title, authors, isbn }) {
   const clean = cleanIsbn(isbn);
   if (clean) {
     const olCover = await fetchCoverBase64(openLibraryCoverUrl(clean));
-    if (olCover) results.push({ title: 'Open Library', authors: [], cover_base64: olCover });
+    if (olCover) results.push({ title: 'Open Library', authors: [], source: 'catalog', cover_base64: olCover });
 
     try {
       const gb = await lookupIsbnGoogleBooks(clean);
       report.ok++;
       if (gb && gb.cover) {
         const cover = await fetchCover(gb.cover);
-        if (cover) results.push({ title: gb.title, authors: gb.authors, cover_base64: cover });
+        if (cover) results.push({ title: gb.title, authors: gb.authors, source: 'catalog', cover_base64: cover });
       }
     } catch (e) {
       errors.push(`Google Books (ISBN): ${e.message}`);
     }
   }
 
-  if (results.length < 5) {
-    results.push(...await coverSearchByTitle(
-      String(title || '').trim(),
-      String(authors || '').trim(),
-      5 - results.length,
-      report,
-    ));
-  }
+  const cleanTitle = String(title || '').trim();
+  const cleanAuthors = String(authors || '').trim();
 
-  return { results: results.slice(0, 5), errors, ok: report.ok };
+  // Catalogues et recherche web en parallèle : attendre les premiers pour
+  // décider s'il faut lancer la seconde doublerait le temps d'attente les jours
+  // où les catalogues sont en panne, c'est-à-dire précisément quand on a besoin
+  // du repli.
+  const [catalog, web] = await Promise.all([
+    results.length < CATALOG_RESULTS
+      ? coverSearchByTitle(cleanTitle, cleanAuthors, CATALOG_RESULTS - results.length, report)
+      : [],
+    (cleanTitle || cleanAuthors)
+      ? webCoverCandidates(cleanTitle, cleanAuthors, WEB_RESULTS, report)
+      : [],
+  ]);
+
+  // Les couvertures de catalogue passent devant : elles correspondent à une
+  // édition identifiée, là où une image du web est une ressemblance.
+  results.push(...catalog, ...web);
+
+  return { results, errors, ok: report.ok };
 }
 
 // La couverture que Google Books associe à cet ISBN, sous forme de spécification

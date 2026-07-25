@@ -560,14 +560,23 @@
         const warning = data.warning
           ? `<p class="image-search-status error">${escapeHtml(data.warning)}</p>`
           : '';
-        imageSearchResults.innerHTML = `
-          ${warning}
+        // Les résultats de catalogue correspondent à une édition identifiée,
+        // les images du web sont une simple ressemblance : la provenance doit
+        // être visible avant de cliquer.
+        const group = (label, items) => (items.length ? `
+          <p class="image-search-group">${label}</p>
           <div class="image-search-grid">
-            ${data.results.map((r, i) => `
-              <button type="button" class="image-search-thumb" data-index="${i}" title="${escapeHtml(r.title || '')}">
+            ${items.map((r) => `
+              <button type="button" class="image-search-thumb" data-index="${r._i}" title="${escapeHtml([r.title, r.source].filter(Boolean).join(' — '))}">
                 <img src="${r.cover_base64}" alt="${escapeHtml(r.title || '')}">
               </button>`).join('')}
-          </div>
+          </div>` : '');
+
+        const indexed = data.results.map((r, i) => ({ ...r, _i: i }));
+        imageSearchResults.innerHTML = `
+          ${warning}
+          ${group('From catalogs (matched edition)', indexed.filter((r) => r.source === 'catalog'))}
+          ${group('From the web (check it matches)', indexed.filter((r) => r.source !== 'catalog'))}
           <button type="button" class="secondary image-search-close">None of these</button>
         `;
         imageSearchResults.querySelectorAll('.image-search-thumb').forEach((btn) => {

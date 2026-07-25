@@ -37,8 +37,17 @@ the answers field by field, in this order of precedence:
 | Open Library | yes | Good on English books, patchy on French ones. |
 | Google Books | yes | Needs an API key in practice, see below. |
 
-Cover search by title (the 🔍 button on a book) queries Google Books **and**
-Open Library's `search.json`, so it keeps working when either one is down.
+Cover search by title (the 🔍 button on a book) queries Google Books, Open
+Library's `search.json` **and** a DuckDuckGo image search, in parallel. Results
+are shown in two groups — catalog covers (matched to an edition) first, web
+images (a visual likeness, check before picking) after, each labelled with the
+host it came from.
+
+The web search matters because the catalogs are jointly unavailable more often
+than you'd expect, and simply don't know a large part of a French collection.
+It is scraping of an undocumented endpoint (`lib/ddg-images.js`), so treat it as
+best-effort: it is isolated in its own module and its failure is never fatal.
+
 Google Books is paused for an hour after a `429`, instead of being re-asked on
 every single lookup.
 
