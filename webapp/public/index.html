@@ -83,9 +83,18 @@
     <p id="duplicate-title" class="quick-pick-title"></p>
     <p id="duplicate-room-note" class="quick-pick-status"></p>
     <div class="duplicate-actions">
-      <button type="button" id="duplicate-move-btn" class="secondary hidden"></button>
-      <button type="button" id="duplicate-open-btn" class="primary icon-btn" title="Open record">📖</button>
-      <button type="button" id="duplicate-ignore-btn" class="secondary"></button>
+      <button type="button" id="duplicate-move-btn" class="secondary hidden">
+        <span class="dup-action-icon" aria-hidden="true">📦</span>
+        <span class="dup-action-label"></span>
+      </button>
+      <button type="button" id="duplicate-open-btn" class="primary" title="Open record">
+        <span class="dup-action-icon" aria-hidden="true">📖</span>
+        <span class="dup-action-label">Open record</span>
+      </button>
+      <button type="button" id="duplicate-ignore-btn" class="secondary">
+        <span class="dup-action-icon" aria-hidden="true">✖</span>
+        <span class="dup-action-label"></span>
+      </button>
     </div>
   </div>
 </div>

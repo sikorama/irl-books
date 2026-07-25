@@ -244,7 +244,41 @@ main { padding: 1.5rem; }
 .quick-pick-status { font-size: 0.8rem; color: var(--text-dim); margin: 0.6rem 0 0; min-height: 1.1em; }
 
 .duplicate-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem; }
-.duplicate-actions button { width: 100%; }
+.duplicate-actions button {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+}
+.dup-action-icon { line-height: 1; }
+
+/* Sur mobile, ce panneau arrive juste après un scan : on vise des cibles
+   tactiles franches plutôt que trois barres empilées de la taille du doigt.
+   Les tuiles carrées se répartissent l'espace, que le bouton « déplacer »
+   soit affiché ou non. */
+@media (max-width: 600px) {
+  .duplicate-actions {
+    flex-direction: row;
+    gap: 0.6rem;
+  }
+  .duplicate-actions button {
+    flex: 1 1 0;
+    width: auto;
+    aspect-ratio: 1;
+    min-height: 5.5rem;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.6rem 0.4rem;
+    text-align: center;
+    line-height: 1.15;
+  }
+  .duplicate-actions .dup-action-icon { font-size: 1.9rem; }
+  .duplicate-actions .dup-action-label {
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+  }
+}
 
 #scan-overlay { z-index: 200; }
 .scan-modal { max-width: 420px; }

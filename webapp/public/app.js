@@ -899,6 +899,14 @@
   let duplicateBook = null;
   let duplicateWasScanning = false;
 
+  // Les boutons du doublon portent une icône et un libellé séparés (tuiles
+  // carrées sur mobile) : écrire dans le bouton lui-même effacerait l'icône.
+  function setActionButton(btn, icon, label) {
+    if (icon) btn.querySelector('.dup-action-icon').textContent = icon;
+    btn.querySelector('.dup-action-label').textContent = label;
+    btn.title = label;
+  }
+
   function handleExistingBook(existing) {
     const currentRoom = libraryInput.value.trim();
     duplicateBook = existing;
@@ -906,15 +914,21 @@
 
     duplicateTitle.textContent = existing.title;
     if (currentRoom && (existing.library || '') !== currentRoom) {
-      duplicateRoomNote.textContent = `Currently in "${existing.library || 'Unknown room'}".`;
-      duplicateMoveBtn.textContent = `Fix: move to "${currentRoom}"`;
+      // Les deux pièces vont dans la note : le libellé du bouton reste court,
+      // sinon un nom de pièce à rallonge déborde de la tuile carrée.
+      duplicateRoomNote.textContent = `Currently in "${existing.library || 'Unknown room'}" — you are filing into "${currentRoom}".`;
+      setActionButton(duplicateMoveBtn, '📦', 'Move it here');
       duplicateMoveBtn.dataset.target = currentRoom;
       duplicateMoveBtn.classList.remove('hidden');
     } else {
       duplicateRoomNote.textContent = '';
       duplicateMoveBtn.classList.add('hidden');
     }
-    duplicateIgnoreBtn.textContent = duplicateWasScanning ? 'Ignore, scan another' : 'Ignore, new entry';
+    if (duplicateWasScanning) {
+      setActionButton(duplicateIgnoreBtn, '📷', 'Ignore, scan another');
+    } else {
+      setActionButton(duplicateIgnoreBtn, '✖', 'Ignore, new entry');
+    }
 
     addOverlay.classList.add('hidden');
     duplicateOverlay.classList.remove('hidden');
