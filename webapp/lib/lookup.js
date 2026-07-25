@@ -25,10 +25,39 @@ const COVER_TIMEOUT_MS = 12000;
 // s'obtient sur https://console.cloud.google.com → API « Books API ».
 const GOOGLE_BOOKS_KEY = process.env.GOOGLE_BOOKS_KEY || '';
 
-function httpGet(url, { timeout = TIMEOUT_MS, accept } = {}) {
+async function httpGet(url, { timeout = TIMEOUT_MS, accept, retries = 1 } = {}) {
   const headers = { 'User-Agent': USER_AGENT };
   if (accept) headers.Accept = accept;
-  return fetch(String(url), { headers, signal: AbortSignal.timeout(timeout) });
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+    try {
+      const res = await fetch(String(url), { headers, signal: AbortSignal.timeout(timeout) });
+      // Un 5xx est une panne passagère du catalogue et vaut d'être retenté ;
+      // un 4xx ne changera pas si on redemande la même chose.
+      if (res.status >= 500 && attempt < retries) continue;
+      return res;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError || new Error('injoignable');
+}
+
+// Le quota Google Books est journalier. Une fois épuisé, redemander à chaque
+// recherche n'ajoute que de la latence et du bruit dans les logs : on met la
+// source en pause et on la re-teste au bout d'une heure — assez court pour se
+// remettre d'un pic passager, assez long pour ne pas marteler l'API.
+const GOOGLE_BOOKS_COOLDOWN_MS = 60 * 60 * 1000;
+let googleBooksPausedUntil = 0;
+
+function pauseGoogleBooks() {
+  googleBooksPausedUntil = Date.now() + GOOGLE_BOOKS_COOLDOWN_MS;
+  console.warn('[isbn] quota Google Books épuisé — source mise en pause 1 h.');
+}
+
+function googleBooksPaused() {
+  return Date.now() < googleBooksPausedUntil;
 }
 
 // --- ISBN ------------------------------------------------------------------
@@ -222,7 +251,12 @@ async function lookupIsbnOpenLibrary(isbn) {
 }
 
 async function lookupIsbnGoogleBooks(isbn) {
+  if (googleBooksPaused()) return null;
   const res = await httpGet(googleBooksUrl({ q: `isbn:${isbn}` }), { accept: 'application/json' });
+  if (res.status === 429) {
+    pauseGoogleBooks();
+    return null;
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   const item = Array.isArray(data.items) ? data.items[0] : null;
@@ -295,33 +329,99 @@ async function lookupIsbn(isbn) {
 
 // --- Recherche de couvertures ----------------------------------------------
 
-async function imageSearchByTitle(q, limit) {
-  const res = await httpGet(googleBooksUrl({ q, maxResults: '20', printType: 'books' }), {
+// Candidats Google Books pour une recherche titre/auteur.
+async function googleTitleCandidates(query, limit) {
+  if (googleBooksPaused()) throw new Error('quota épuisé, source en pause');
+  const res = await httpGet(googleBooksUrl({ q: query, maxResults: '20', printType: 'books' }), {
     accept: 'application/json',
   });
-  if (!res.ok) throw new Error(`Google Books a répondu ${res.status}`);
+  if (res.status === 429) {
+    pauseGoogleBooks();
+    throw new Error('HTTP 429 (quota journalier épuisé)');
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
 
   const candidates = [];
-  // On prend quelques candidats de plus que demandé : certaines vignettes ne
-  // se téléchargent pas, et on préfère combler que rendre une grille trouée.
   for (const item of Array.isArray(data.items) ? data.items : []) {
-    if (candidates.length >= limit + 3) break;
+    if (candidates.length >= limit) break;
     const info = item.volumeInfo || {};
     const thumb = info.imageLinks && (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail);
     if (!thumb) continue;
     candidates.push({ title: info.title || null, authors: info.authors || [], cover: googleCover(thumb) });
   }
+  return candidates;
+}
 
-  const covers = await Promise.all(candidates.map((c) => fetchCover(c.cover)));
-  return candidates
+// Candidats Open Library. `search.json` n'accepte pas correctement une requête
+// en texte libre pour ce genre de titre (0 résultat, ou une latence de plus de
+// 30 s) : il faut lui passer `title` et `author` séparément.
+async function openLibraryTitleCandidates(title, authors, limit) {
+  const params = new URLSearchParams({ fields: 'title,author_name,cover_i', limit: String(limit * 2) });
+  if (title) params.set('title', title);
+  if (authors) params.set('author', authors);
+  if (!params.has('title') && !params.has('author')) return [];
+
+  const res = await httpGet(`https://openlibrary.org/search.json?${params}`, { accept: 'application/json' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+
+  const candidates = [];
+  for (const doc of Array.isArray(data.docs) ? data.docs : []) {
+    if (candidates.length >= limit) break;
+    if (!doc.cover_i) continue;
+    candidates.push({
+      title: doc.title || null,
+      authors: doc.author_name || [],
+      cover: { url: `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`, fallback: null },
+    });
+  }
+  return candidates;
+}
+
+// Recherche par titre/auteur sur les deux catalogues. Google Books était
+// jusqu'ici la seule source : dès qu'il tombait (429/503), la fonctionnalité
+// entière ne rendait plus rien.
+async function coverSearchByTitle(title, authors, limit, report) {
+  const query = [title, authors].filter(Boolean).join(' ').trim();
+  const collect = async (name, fn) => {
+    try {
+      const candidates = await fn();
+      report.ok++;
+      return candidates;
+    } catch (e) {
+      report.errors.push(`${name}: ${e.message}`);
+      return [];
+    }
+  };
+
+  const [google, openLibrary] = await Promise.all([
+    query ? collect('Google Books', () => googleTitleCandidates(query, limit + 3)) : [],
+    collect('Open Library', () => openLibraryTitleCandidates(title, authors, limit + 3)),
+  ]);
+
+  // On alterne les deux sources pour qu'aucune ne monopolise la grille.
+  const ordered = [];
+  for (let i = 0; i < Math.max(google.length, openLibrary.length); i++) {
+    if (google[i]) ordered.push(google[i]);
+    if (openLibrary[i]) ordered.push(openLibrary[i]);
+  }
+
+  const covers = await Promise.all(ordered.map((c) => fetchCover(c.cover)));
+  return ordered
     .map((c, i) => ({ title: c.title, authors: c.authors, cover_base64: covers[i] }))
     .filter((r) => r.cover_base64)
     .slice(0, limit);
 }
 
-async function imageSearch(query, isbn) {
+// Renvoie { results, errors, ok } où `ok` compte les sources qui ont
+// effectivement répondu. Une source qui répond « rien » est un résultat
+// légitime ; une source qui tombe ne l'est pas, et rien ne distinguait les deux
+// côté utilisateur jusqu'ici.
+async function imageSearch({ title, authors, isbn }) {
   const results = [];
+  const report = { errors: [], ok: 0 };
+  const { errors } = report;
 
   // Une couverture indexée par ISBN correspond bien plus souvent à l'édition
   // exacte qu'une recherche titre/auteur en texte libre — les éditions
@@ -332,27 +432,28 @@ async function imageSearch(query, isbn) {
     const olCover = await fetchCoverBase64(openLibraryCoverUrl(clean));
     if (olCover) results.push({ title: 'Open Library', authors: [], cover_base64: olCover });
 
-    const gb = await runSource('Google Books', () => lookupIsbnGoogleBooks(clean));
-    if (gb && gb.cover) {
-      const cover = await fetchCover(gb.cover);
-      if (cover) results.push({ title: gb.title, authors: gb.authors, cover_base64: cover });
-    }
-  }
-
-  const q = String(query || '').trim();
-  if (q && results.length < 5) {
     try {
-      results.push(...await imageSearchByTitle(q, 5 - results.length));
+      const gb = await lookupIsbnGoogleBooks(clean);
+      report.ok++;
+      if (gb && gb.cover) {
+        const cover = await fetchCover(gb.cover);
+        if (cover) results.push({ title: gb.title, authors: gb.authors, cover_base64: cover });
+      }
     } catch (e) {
-      // Un échec ici ne doit pas jeter les couvertures déjà trouvées via l'ISBN
-      // — on ne remonte l'erreur que si c'était la seule source et qu'elle n'a
-      // rien donné.
-      if (results.length === 0) throw e;
-      console.warn(`[image-search] recherche par titre indisponible : ${e.message}`);
+      errors.push(`Google Books (ISBN): ${e.message}`);
     }
   }
 
-  return results.slice(0, 5);
+  if (results.length < 5) {
+    results.push(...await coverSearchByTitle(
+      String(title || '').trim(),
+      String(authors || '').trim(),
+      5 - results.length,
+      report,
+    ));
+  }
+
+  return { results: results.slice(0, 5), errors, ok: report.ok };
 }
 
 // La couverture que Google Books associe à cet ISBN, sous forme de spécification
@@ -372,5 +473,6 @@ module.exports = {
   openLibraryCoverUrl,
   cleanIsbn,
   isbnVariants,
+  googleBooksPaused,
   hasGoogleBooksKey: () => Boolean(GOOGLE_BOOKS_KEY),
 };

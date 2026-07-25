@@ -542,15 +542,26 @@
       imageSearchResults.classList.remove('hidden');
       imageSearchResults.innerHTML = '<p class="image-search-status">Searching…</p>';
       try {
-        const params = new URLSearchParams({ q: query });
+        const params = new URLSearchParams();
+        if (titleVal) params.set('title', titleVal);
+        if (authorsVal) params.set('authors', authorsVal);
         if (isbnVal) params.set('isbn', isbnVal);
         const res = await fetch(`/api/image-search?${params}`);
         const data = await res.json();
         if (!data.results || !data.results.length) {
-          imageSearchResults.innerHTML = '<p class="image-search-status">No results found.</p>';
+          // Une panne de catalogue et « ce livre n'a de couverture nulle part »
+          // s'affichaient à l'identique : impossible de savoir quoi faire.
+          const problem = data.error || data.warning;
+          imageSearchResults.innerHTML = problem
+            ? `<p class="image-search-status error">${escapeHtml(problem)}</p>`
+            : '<p class="image-search-status">No results found.</p>';
           return;
         }
+        const warning = data.warning
+          ? `<p class="image-search-status error">${escapeHtml(data.warning)}</p>`
+          : '';
         imageSearchResults.innerHTML = `
+          ${warning}
           <div class="image-search-grid">
             ${data.results.map((r, i) => `
               <button type="button" class="image-search-thumb" data-index="${i}" title="${escapeHtml(r.title || '')}">

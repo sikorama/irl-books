@@ -417,8 +417,19 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'image-search') {
     try {
-      const results = await imageSearch(url.searchParams.get('q'), url.searchParams.get('isbn'));
-      return sendJson(res, 200, { results });
+      const { results, errors, ok } = await imageSearch({
+        title: url.searchParams.get('title'),
+        authors: url.searchParams.get('authors'),
+        isbn: url.searchParams.get('isbn'),
+      });
+      // Échec réel seulement si aucune source n'a répondu. Si au moins une a
+      // cherché et n'a rien trouvé, c'est un résultat vide légitime — on
+      // signale quand même les sources tombées, qui expliquent une grille plus
+      // pauvre que d'habitude.
+      if (!results.length && !ok) {
+        return sendJson(res, 502, { results, error: `Search failed — ${errors.join(' · ')}` });
+      }
+      return sendJson(res, 200, { results, warning: errors.length ? errors.join(' · ') : undefined });
     } catch (e) {
       return sendJson(res, 502, { results: [], error: `Search failed: ${e.message}` });
     }

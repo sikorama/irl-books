@@ -10,7 +10,7 @@
 
 const { imageSize } = require('./image.js');
 const {
-  fetchCoverImage, googleBooksCover, openLibraryCoverUrl, cleanIsbn, isbnVariants,
+  fetchCoverImage, googleBooksCover, openLibraryCoverUrl, cleanIsbn, isbnVariants, googleBooksPaused,
 } = require('./lookup.js');
 
 const DEFAULT_MIN_WIDTH = 400;
@@ -125,6 +125,13 @@ async function upgradeCovers(db, options = {}) {
     if (delayMs && totals.processed < candidates.length) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
+  }
+
+  // Quota épuisé : la source se met en pause d'elle-même et cesse de lever,
+  // donc le compteur d'erreurs ci-dessus ne la verrait plus. Sans cette ligne,
+  // un run entier passerait sous silence le fait que Google a été ignoré.
+  if (googleBooksPaused() && !sourceErrors.has('Google Books')) {
+    sourceErrors.set('Google Books', totals.processed);
   }
 
   return { ...totals, source_errors: Object.fromEntries(sourceErrors) };
