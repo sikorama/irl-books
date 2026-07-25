@@ -30,7 +30,7 @@ function main() {
 
   const getGroupRows = db.prepare('SELECT * FROM books WHERE ident = ?');
   const deleteStmt = db.prepare('DELETE FROM books WHERE id = ?');
-  const setCoverStmt = db.prepare('UPDATE books SET cover = ?, cover_mime = ? WHERE id = ?');
+  const setCoverStmt = db.prepare('UPDATE books SET cover = ?, cover_mime = ?, cover_rev = cover_rev + 1 WHERE id = ?');
 
   let merged = 0;
   let rowsDeleted = 0;

@@ -93,7 +93,7 @@ async function upgradeCovers(db, options = {}) {
 
   const candidates = findCandidates(db, minWidth).slice(0, limit);
   if (onStart) onStart(candidates.length);
-  const updateStmt = db.prepare('UPDATE books SET cover = ?, cover_mime = ? WHERE id = ?');
+  const updateStmt = db.prepare('UPDATE books SET cover = ?, cover_mime = ?, cover_rev = cover_rev + 1 WHERE id = ?');
   const totals = { total: candidates.length, processed: 0, upgraded: 0, unchanged: 0, failed: 0 };
   const sourceErrors = new Map();
   const noteSourceError = (source, err) => {

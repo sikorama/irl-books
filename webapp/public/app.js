@@ -132,6 +132,13 @@
     }[c]));
   }
 
+  // La révision fait partie de l'URL : sans elle le navigateur garderait
+  // l'ancienne couverture en cache et changer d'image n'aurait aucun effet
+  // visible.
+  function coverUrl(book) {
+    return `/api/books/${book.id}/cover?v=${book.cover_rev || 0}`;
+  }
+
   function buildQuery() {
     const params = new URLSearchParams();
     if (searchInput.value.trim()) params.set('q', searchInput.value.trim());
@@ -223,7 +230,7 @@
         <label class="card-select">
           <input type="checkbox" class="card-select-input" ${selectedIds.has(book.id) ? 'checked' : ''}>
         </label>
-        <img loading="lazy" src="/api/books/${book.id}/cover" alt="${escapeHtml(book.title)}">
+        <img loading="lazy" src="${coverUrl(book)}" alt="${escapeHtml(book.title)}">
         <div class="badges">${badges.join('')}</div>
       </div>
       <div class="meta">
@@ -450,7 +457,7 @@
         <div class="cover-col">
           <label class="cover-edit">
             <input type="file" accept="image/*" class="cover-edit-input">
-            <img class="cover" src="/api/books/${book.id}/cover" alt="${escapeHtml(book.title)}">
+            <img class="cover" src="${coverUrl(book)}" alt="${escapeHtml(book.title)}">
             <span class="cover-edit-hint">Change cover</span>
           </label>
           <div class="cover-search-actions">
@@ -489,6 +496,23 @@
     const statusEl = detailContent.querySelector('.field-save-status');
     const coverImg = detailContent.querySelector('img.cover');
 
+    // Point de passage unique pour écrire une couverture : la révision
+    // renvoyée par le serveur est reportée sur `book` pour que l'aperçu ici et
+    // les vignettes de la grille pointent tous vers la nouvelle image.
+    async function saveCover(cover_base64) {
+      const res = await fetch(`/api/books/${book.id}/cover`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cover_base64 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Cover not saved (HTTP ${res.status})`);
+      book.cover_rev = data.cover_rev ?? (book.cover_rev || 0) + 1;
+      book.has_cover = true;
+      coverImg.src = coverUrl(book);
+      await loadBooks();
+    }
+
     async function saveField(patch) {
       statusEl.textContent = 'Saving…';
       try {
@@ -521,13 +545,12 @@
     }
 
     async function setCoverFromSearch(cover_base64) {
-      await fetch(`/api/books/${book.id}/cover`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cover_base64 }),
-      });
-      coverImg.src = `/api/books/${book.id}/cover?t=${Date.now()}`;
-      await loadBooks();
+      try {
+        await saveCover(cover_base64);
+      } catch (err) {
+        statusEl.textContent = err.message;
+        return;
+      }
       closeImageSearch();
     }
 
@@ -720,13 +743,7 @@
         if (patch.publishing_year) detailContent.querySelector('[data-field="publishing_year"]').value = patch.publishing_year;
 
         if (data.cover_base64) {
-          await fetch(`/api/books/${book.id}/cover`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cover_base64: data.cover_base64 }),
-          });
-          coverImg.src = `/api/books/${book.id}/cover?t=${Date.now()}`;
-          await loadBooks();
+          await saveCover(data.cover_base64);
         }
         beep('success');
         statusEl.textContent = 'Fields updated ✓';
@@ -760,17 +777,7 @@
           reader.onerror = () => reject(reader.error);
           reader.readAsDataURL(file);
         });
-        const res = await fetch(`/api/books/${book.id}/cover`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cover_base64: dataUrl }),
-        });
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || 'Unknown error');
-        }
-        coverImg.src = `/api/books/${book.id}/cover?t=${Date.now()}`;
-        await loadBooks();
+        await saveCover(dataUrl);
       } catch (err) {
         uploadError.textContent = err.message;
       }

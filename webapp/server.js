@@ -91,6 +91,7 @@ function rowToBook(row) {
     tags: JSON.parse(row.tags || '[]'),
     genre: row.genre,
     has_cover: row.cover !== null,
+    cover_rev: row.cover_rev || 0,
     created_at: row.created_at,
   };
 }
@@ -98,7 +99,7 @@ function rowToBook(row) {
 const BOOK_COLUMNS = `
   id, library, ident, isbn, title, authors, publisher, publishing_year,
   edition, notes, own, want, redd, loaned, loaned_to, rating, tags, genre,
-  cover, created_at
+  cover, cover_rev, created_at
 `;
 
 function listBooks(query) {
@@ -467,17 +468,34 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && parts.length === 4 && parts[1] === 'books' && parts[3] === 'cover') {
     const id = Number(parts[2]);
-    const row = db.prepare('SELECT cover, cover_mime FROM books WHERE id = ?').get(id);
+    const row = db.prepare('SELECT cover, cover_mime, cover_rev FROM books WHERE id = ?').get(id);
+    const rev = row ? (row.cover_rev || 0) : 0;
+    // L'URL est la même pour toute la vie du livre alors que l'image change :
+    // on ne peut donc pas la déclarer `immutable` sans la versionner. Quand le
+    // client épingle la révision (?v=), le cache long est sûr ; sinon on force
+    // une revalidation (l'ETag renvoie un 304 tant que rien n'a bougé).
+    const etag = `"${id}-${rev}${row && row.cover ? '' : '-none'}"`;
+    const pinned = url.searchParams.get('v') === String(rev);
+    const cacheControl = pinned
+      ? 'public, max-age=31536000, immutable'
+      : 'no-cache';
+
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { ETag: etag, 'Cache-Control': cacheControl });
+      return res.end();
+    }
+
     if (!row || !row.cover) {
       return fs.readFile(path.join(__dirname, '..', 'db-alexandria', 'nocover.jpg'), (err, data) => {
         if (err) { res.writeHead(404); return res.end(); }
-        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', ETag: etag, 'Cache-Control': 'no-cache' });
         res.end(data);
       });
     }
     res.writeHead(200, {
       'Content-Type': row.cover_mime || 'application/octet-stream',
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      ETag: etag,
+      'Cache-Control': cacheControl,
     });
     return res.end(row.cover);
   }
@@ -508,8 +526,10 @@ async function handleApi(req, res, url) {
       return sendJson(res, 400, { error: `Invalid cover image: ${e.message}` });
     }
 
-    db.prepare('UPDATE books SET cover = ?, cover_mime = ? WHERE id = ?').run(coverBuf, coverMime, id);
-    return sendJson(res, 200, { ok: true });
+    db.prepare('UPDATE books SET cover = ?, cover_mime = ?, cover_rev = cover_rev + 1 WHERE id = ?')
+      .run(coverBuf, coverMime, id);
+    const { cover_rev: coverRev } = db.prepare('SELECT cover_rev FROM books WHERE id = ?').get(id);
+    return sendJson(res, 200, { ok: true, cover_rev: coverRev });
   }
 
   if (req.method === 'PATCH' && parts.length === 3 && parts[1] === 'books') {

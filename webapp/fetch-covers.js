@@ -45,7 +45,7 @@ async function main() {
     ORDER BY id
   `).all().slice(0, limit);
 
-  const updateStmt = db.prepare('UPDATE books SET cover = ?, cover_mime = ? WHERE id = ?');
+  const updateStmt = db.prepare('UPDATE books SET cover = ?, cover_mime = ?, cover_rev = cover_rev + 1 WHERE id = ?');
 
   let found = 0;
   let missed = 0;
