@@ -453,6 +453,7 @@
       .map((lib) => `<option value="${escapeHtml(lib.name)}" ${lib.name === (book.library || '') ? 'selected' : ''}>${escapeHtml(lib.name)} (${lib.count})</option>`)
       .join('');
     detailContent.innerHTML = `
+      <div class="image-search-results hidden"></div>
       <div class="detail-layout">
         <div class="cover-col">
           <label class="cover-edit">
@@ -490,7 +491,6 @@
           <p class="cover-upload-error error"></p>
         </div>
       </div>
-      <div class="image-search-results hidden"></div>
     `;
 
     const statusEl = detailContent.querySelector('.field-save-status');
@@ -563,6 +563,10 @@
 
       imageSearchBtn.disabled = true;
       imageSearchResults.classList.remove('hidden');
+      // Le panneau est en tête de la fiche : on remonte la modale pour que les
+      // vignettes arrivent sous les yeux, sans avoir à chercher plus bas.
+      const scroller = detailContent.closest('.modal');
+      if (scroller) scroller.scrollTo({ top: 0, behavior: 'smooth' });
       // Les résultats de catalogue correspondent à une édition identifiée, les
       // images du web sont une simple ressemblance : la provenance doit être
       // visible avant de cliquer. Les deux grilles existent dès le départ pour

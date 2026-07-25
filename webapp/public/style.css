@@ -388,7 +388,13 @@ main { padding: 1.5rem; }
 .detail-modal .loaned-row input[type=text] { flex: 1; }
 .field-save-status { grid-column: 1 / -1; font-size: 0.75rem; color: var(--text-dim); min-height: 1.1em; margin: 0.2rem 0 0; }
 
-.image-search-results { margin-top: 0.5rem; }
+/* Le panneau ouvre en tête de la fiche : le trait du bas le sépare du livre
+   qu'il est en train d'illustrer. */
+.image-search-results:not(.hidden) {
+  margin: 0 0 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
 .image-search-status { font-size: 0.8rem; color: var(--text-dim); margin: 0; }
 .image-search-grid {
   display: grid;
