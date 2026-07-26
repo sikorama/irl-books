@@ -7,6 +7,7 @@
   const genreSelect = document.getElementById('genre-filter');
   const addGenreSelect = document.getElementById('add-genre-select');
   const flagInputs = [...document.querySelectorAll('.flag-filters input[data-flag]')];
+  const statsLink = document.getElementById('stats-link');
 
   const detailOverlay = document.getElementById('detail-overlay');
   const detailContent = document.getElementById('detail-content');
@@ -23,6 +24,8 @@
   const addError = document.getElementById('add-error');
   const coverInput = document.getElementById('cover-input');
   const coverPreview = document.getElementById('cover-preview');
+  const addImageSearchBtn = document.getElementById('add-image-search-btn');
+  const addImageSearchResults = document.getElementById('add-image-search');
   const librarySelect = document.getElementById('library-select');
   const libraryInput = document.getElementById('library-input');
   const isbnInput = document.getElementById('isbn-input');
@@ -58,10 +61,22 @@
   let currentBooks = [];
   let quickLibraryBookId = null;
   let quickGenreBookId = null;
+  let quickGenreEndpoint = 'books';
   let genreCatalog = [];
   const selectedIds = new Set();
   let lastLibrary = localStorage.getItem('irl-books:lastLibrary') || '';
   let lastGenre = localStorage.getItem('irl-books:lastGenre') || '';
+
+  // Le cloud est une pièce du catalogue : les documents numérisés y vivent comme
+  // les livres papier vivent dans le Grand Bureau ou le Grenier.
+  const CLOUD_ROOM = 'cloud';
+
+  function formatSize(bytes) {
+    if (!bytes) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    return `${(bytes / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
+  }
 
   function genreLabel(value) {
     if (!value) return null;
@@ -79,8 +94,30 @@
     return opts.join('');
   }
 
+  // La langue n'affecte que les intitulés : les `value` renvoyés sont les mêmes
+  // et ce sont eux qui sont stockés dans les fiches.
+  function uiLang() {
+    return localStorage.getItem('irl-books:lang') || 'fr';
+  }
+
+  // Le catalogue de langues est chargé une fois : c'est une liste fermée, pas un
+  // champ libre, pour que « fr », « fra » et « Français » ne cohabitent pas.
+  let languageCatalog = [];
+
+  async function loadLanguages() {
+    const res = await fetch(`/api/languages?lang=${encodeURIComponent(uiLang())}`);
+    const data = await res.json();
+    languageCatalog = data.languages || [];
+  }
+
+  function languageOptionsHtml(selected) {
+    return ['<option value="">—</option>']
+      .concat(languageCatalog.map((l) => `<option value="${escapeHtml(l.code)}" ${l.code === selected ? 'selected' : ''}>${escapeHtml(l.label)}</option>`))
+      .join('');
+  }
+
   async function loadGenres() {
-    const res = await fetch('/api/genres');
+    const res = await fetch(`/api/genres?lang=${encodeURIComponent(uiLang())}`);
     const data = await res.json();
     genreCatalog = data.genres;
 
@@ -104,6 +141,14 @@
     scan: [{ freq: 1800, start: 0, dur: 0.07 }],
     success: [{ freq: 880, start: 0, dur: 0.09 }, { freq: 1320, start: 0.1, dur: 0.14 }],
     fail: [{ freq: 320, start: 0, dur: 0.16 }, { freq: 200, start: 0.15, dur: 0.24 }],
+    // La recherche de couverture a ses propres bips : même famille que ceux du
+    // scan, pour qu'ils restent reconnaissables, mais un ton en dessous, plus
+    // courts et plus discrets. C'est voulu — ils ponctuent une recherche partie
+    // toute seule, pas un geste de l'utilisateur, et pendant une séance de
+    // scan ils ne doivent pas se confondre avec le bip du code-barres.
+    searchStart: [{ freq: 1500, start: 0, dur: 0.05, gain: 0.09 }],
+    searchDone: [{ freq: 780, start: 0, dur: 0.07, gain: 0.09 }, { freq: 1170, start: 0.08, dur: 0.11, gain: 0.09 }],
+    searchNone: [{ freq: 420, start: 0, dur: 0.11, gain: 0.09 }],
   };
   function beep(kind) {
     try {
@@ -116,7 +161,7 @@
         osc.type = 'square';
         osc.frequency.value = note.freq;
         osc.connect(gain).connect(ctx.destination);
-        gain.gain.setValueAtTime(0.15, now + note.start);
+        gain.gain.setValueAtTime(note.gain ?? 0.15, now + note.start);
         gain.gain.exponentialRampToValueAtTime(0.0001, now + note.start + note.dur);
         osc.start(now + note.start);
         osc.stop(now + note.start + note.dur + 0.02);
@@ -133,11 +178,184 @@
     }[c]));
   }
 
-  // La révision fait partie de l'URL : sans elle le navigateur garderait
-  // l'ancienne couverture en cache et changer d'image n'aurait aucun effet
-  // visible.
-  function coverUrl(book) {
-    return `/api/books/${book.id}/cover?v=${book.cover_rev || 0}`;
+  // L'URL vient du serveur, parce que les deux collections ne la construisent
+  // pas pareil : une fiche papier porte sa révision de couverture (sans elle le
+  // navigateur garderait l'ancienne image en cache et changer de couverture
+  // n'aurait aucun effet visible), un document du cloud est servi depuis le
+  // disque avec un ETag sur la taille et la date.
+  function coverUrl(entry) {
+    if (entry.cover_url) return entry.cover_url;
+    return `/api/books/${entry.id}/cover?v=${entry.cover_rev || 0}`;
+  }
+
+  // --- Recherche de couverture ---------------------------------------------
+  //
+  // Ce panneau était propre à la fiche détaillée. Il est devenu commun le jour
+  // où le formulaire d'ajout a dû lancer la même recherche : deux copies du
+  // même flux d'événements auraient dérivé l'une de l'autre, et c'est le
+  // chemin le plus emprunté de l'application — celui d'une séance de scan.
+  //
+  // `host` est le conteneur où se dessine le panneau, `onPick` reçoit l'image
+  // choisie. Le reste — provenance, progression, pannes de source — est
+  // identique partout.
+
+  function coverSearchIsPossible({ title, authors, isbn }) {
+    return Boolean((title || '').trim() || (authors || '').trim() || (isbn || '').trim());
+  }
+
+  // La recherche qui part toute seule à l'ouverture d'une fiche ne part qu'une
+  // fois par livre et par session : sans cela, parcourir les centaines de fiches
+  // sans couverture interrogerait les catalogues à chaque coup d'œil, pour la
+  // même réponse. Le bouton 🔍 et l'enchaînement après une recherche d'ISBN
+  // restent libres — ils sont demandés explicitement, eux.
+  //
+  // `sessionStorage` plutôt qu'une variable : la marque survit à un
+  // rechargement de la page, mais pas à la fermeture de l'onglet — une nouvelle
+  // séance retente, les sources ayant pu s'enrichir entre-temps.
+  const AUTO_SEARCH_KEY = 'irl-books:autoCoverSearched';
+
+  function autoSearchAlreadyDone(bookId) {
+    try {
+      const done = JSON.parse(sessionStorage.getItem(AUTO_SEARCH_KEY) || '[]');
+      return Array.isArray(done) && done.includes(bookId);
+    } catch {
+      return false;
+    }
+  }
+
+  function markAutoSearchDone(bookId) {
+    try {
+      const done = JSON.parse(sessionStorage.getItem(AUTO_SEARCH_KEY) || '[]');
+      const list = Array.isArray(done) ? done : [];
+      if (!list.includes(bookId)) list.push(bookId);
+      sessionStorage.setItem(AUTO_SEARCH_KEY, JSON.stringify(list));
+    } catch {
+      // Stockage indisponible (navigation privée, quota) : on retombe sur le
+      // comportement précédent — la recherche repartira à la prochaine
+      // ouverture. C'est du bruit réseau, pas une perte de données.
+    }
+  }
+
+  async function runImageSearch({ host, title, authors, isbn, onPick, sound = false }) {
+    const query = { title: (title || '').trim(), authors: (authors || '').trim(), isbn: (isbn || '').trim() };
+    if (!coverSearchIsPossible(query)) return 0;
+
+    function close() {
+      host.classList.add('hidden');
+      host.innerHTML = '';
+    }
+
+    host.classList.remove('hidden');
+    // Le panneau est en tête de la fiche : on remonte la modale pour que les
+    // vignettes arrivent sous les yeux, sans avoir à chercher plus bas.
+    const scroller = host.closest('.modal');
+    if (scroller) scroller.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // Les résultats de catalogue correspondent à une édition identifiée, les
+    // images du web sont une simple ressemblance : la provenance doit être
+    // visible avant de cliquer. Les deux grilles existent dès le départ pour
+    // pouvoir y verser les vignettes au fil de leur arrivée.
+    host.innerHTML = `
+      <p class="image-search-status search-progress">
+        <span class="spinner" aria-hidden="true"></span><span class="progress-label">Starting…</span>
+      </p>
+      <div class="image-search-section hidden" data-group="catalog">
+        <p class="image-search-group">From catalogs (matched edition)</p>
+        <div class="image-search-grid"></div>
+      </div>
+      <div class="image-search-section hidden" data-group="web">
+        <p class="image-search-group">From the web (check it matches)</p>
+        <div class="image-search-grid"></div>
+      </div>
+      <p class="image-search-status error search-problems"></p>
+      <button type="button" class="secondary image-search-close">None of these</button>
+    `;
+    host.querySelector('.image-search-close').addEventListener('click', close);
+
+    const progressEl = host.querySelector('.search-progress');
+    const labelEl = host.querySelector('.progress-label');
+    const problemsEl = host.querySelector('.search-problems');
+    const startedAt = Date.now();
+    const problems = [];
+    let pending = 0;
+    let found = 0;
+
+    if (sound) beep('searchStart');
+
+    const tick = setInterval(() => {
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      labelEl.textContent = `Searching ${pending} source${pending !== 1 ? 's' : ''}… ${seconds}s · ${found} cover${found !== 1 ? 's' : ''} found`;
+    }, 250);
+
+    function addResult(result) {
+      found++;
+      const section = host.querySelector(`.image-search-section[data-group="${result.group === 'web' ? 'web' : 'catalog'}"]`);
+      section.classList.remove('hidden');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'image-search-thumb';
+      btn.title = [result.title, result.source].filter(Boolean).join(' — ');
+      btn.innerHTML = `<img src="${result.cover_base64}" alt="${escapeHtml(result.title || '')}">`;
+      btn.addEventListener('click', async () => {
+        const kept = await onPick(result.cover_base64);
+        if (kept !== false) close();
+      });
+      section.querySelector('.image-search-grid').appendChild(btn);
+    }
+
+    function handleEvent(event) {
+      if (event.type === 'start') pending = event.sources.length;
+      if (event.type === 'result') addResult(event.result);
+      if (event.type === 'source') {
+        pending = Math.max(0, pending - 1);
+        if (event.state === 'error') {
+          problems.push(`${event.name}: ${event.message}`);
+          problemsEl.textContent = problems.join(' · ');
+        }
+      }
+    }
+
+    try {
+      const params = new URLSearchParams();
+      if (query.title) params.set('title', query.title);
+      if (query.authors) params.set('authors', query.authors);
+      if (query.isbn) params.set('isbn', query.isbn);
+
+      const res = await fetch(`/api/image-search?${params}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // la dernière peut être incomplète
+        for (const line of lines) {
+          if (line.trim()) handleEvent(JSON.parse(line));
+        }
+      }
+
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      if (found) {
+        progressEl.textContent = `${found} cover${found !== 1 ? 's' : ''} found in ${seconds}s.`;
+      } else {
+        progressEl.textContent = problems.length
+          ? `No cover found in ${seconds}s — every source failed.`
+          : 'No results found.';
+      }
+      // Le second bip dit aussi s'il y a quelque chose à regarder : pendant une
+      // séance de scan, c'est ce qui permet de ne pas lever les yeux pour rien.
+      if (sound) beep(found ? 'searchDone' : 'searchNone');
+    } catch (err) {
+      progressEl.textContent = '';
+      problems.push(err.message);
+      problemsEl.textContent = problems.join(' · ');
+      if (sound) beep('searchNone');
+    } finally {
+      clearInterval(tick);
+    }
+    return found;
   }
 
   function buildQuery() {
@@ -154,6 +372,10 @@
   async function loadLibraries() {
     const res = await fetch('/api/libraries');
     const libs = await res.json();
+    // Le cloud est une pièce du catalogue, donc présent dans le filtre — mais
+    // c'est une pièce virtuelle : on ne peut pas y « déplacer » un livre papier,
+    // ni en créer un dedans. Toute liste de destination l'exclut.
+    const realRooms = libs.filter((lib) => lib.name && !lib.virtual);
     const current = libSelect.value;
     [...libSelect.options].slice(1).forEach((o) => o.remove());
     for (const lib of libs) {
@@ -165,15 +387,14 @@
     libSelect.value = current;
 
     const currentLibraryChoice = librarySelect.value;
-    librarySelect.innerHTML = '<option value="">Choose a room…</option>' + libs
-      .filter((lib) => lib.name)
+    librarySelect.innerHTML = '<option value="">Choose a room…</option>' + realRooms
       .map((lib) => `<option value="${escapeHtml(lib.name)}">${escapeHtml(lib.name)} (${lib.count})</option>`)
       .join('');
     librarySelect.value = currentLibraryChoice;
 
     const currentMoveTarget = moveTargetSelect.value;
     [...moveTargetSelect.options].slice(1).forEach((o) => o.remove());
-    for (const lib of libs.filter((l) => l.name)) {
+    for (const lib of realRooms) {
       const opt = document.createElement('option');
       opt.value = lib.name;
       opt.textContent = `${lib.name} (${lib.count})`;
@@ -192,8 +413,12 @@
     selectionCountEl.textContent = `${n} selected`;
     moveBtn.disabled = n === 0 || !moveTargetSelect.value;
     genreBtn.disabled = n === 0 || !genreTargetSelect.value;
-    const idsOnPage = currentBooks.map((b) => b.id);
+    const idsOnPage = currentBooks.map((b) => b.uid);
     selectAllCheckbox.checked = idsOnPage.length > 0 && idsOnPage.every((id) => selectedIds.has(id));
+    // Déplacer vers une pièce n'a de sens que pour du papier : si la sélection
+    // ne contient que des documents du cloud, le bouton reste inerte.
+    const hasBooks = [...selectedIds].some((uid) => String(uid).startsWith('b'));
+    moveBtn.disabled = moveBtn.disabled || !hasBooks;
   }
 
   function setSelectMode(on) {
@@ -216,54 +441,93 @@
     updateSelectionUI();
   }
 
-  function renderCard(book) {
+  // Une carte est soit une fiche papier, soit un document du cloud. Ce qui
+  // diffère : la troisième ligne (ISBN pour le papier, année et poids du fichier
+  // pour un document), et le fait que la pastille de pièce d'un document n'est
+  // pas cliquable — on ne déménage pas un fichier dans le Grenier.
+  function renderCard(entry) {
+    const isDoc = entry.kind === 'document';
     const card = document.createElement('div');
-    card.className = 'card' + (selectedIds.has(book.id) ? ' selected' : '');
-    card.dataset.id = book.id;
+    card.className = 'card' + (selectedIds.has(entry.uid) ? ' selected' : '') + (isDoc ? ' doc-card' : '');
+    card.dataset.id = entry.uid;
 
     const badges = [];
-    badges.push(`<span class="badge location">${escapeHtml(book.library || 'Unknown room')}</span>`);
-    badges.push(`<span class="badge genre">${escapeHtml(genreLabel(book.genre) || 'No genre')}</span>`);
-    if (book.loaned) badges.push('<span class="badge loaned">Loaned</span>');
+    // La pastille de format est un lien direct vers le fichier : c'est le geste
+    // le plus fréquent sur un document, il ne mérite pas de passer par la fiche.
+    // `target="_blank"` laisse le navigateur décider — visionneuse intégrée pour
+    // un PDF, téléchargement pour le reste.
+    badges.push(isDoc
+      ? (entry.file_count
+        ? `<a class="badge location cloud" href="/api/documents/${entry.id}/file" target="_blank" rel="noopener" title="Open ${escapeHtml(entry.format || 'file')}">☁️ ${escapeHtml(entry.format || CLOUD_ROOM)}</a>`
+        : `<span class="badge location cloud">☁️ ${escapeHtml(CLOUD_ROOM)}</span>`)
+      : `<span class="badge location">${escapeHtml(entry.library || 'Unknown room')}</span>`);
+    badges.push(`<span class="badge genre">${escapeHtml(genreLabel(entry.genre) || 'No genre')}</span>`);
+    if (entry.loaned) badges.push('<span class="badge loaned">Loaned</span>');
+    if (isDoc && entry.missing_count) badges.push('<span class="badge loaned">Missing</span>');
+    else if (isDoc && !entry.file_count) badges.push('<span class="badge loaned">No file</span>');
+
+    const thirdLine = isDoc
+      ? [entry.pub_year, formatSize(entry.size)].filter(Boolean).join(' · ')
+      : entry.isbn;
 
     card.innerHTML = `
       <div class="cover-wrap">
         <label class="card-select">
-          <input type="checkbox" class="card-select-input" ${selectedIds.has(book.id) ? 'checked' : ''}>
+          <input type="checkbox" class="card-select-input" ${selectedIds.has(entry.uid) ? 'checked' : ''}>
         </label>
-        <img loading="lazy" src="${coverUrl(book)}" alt="${escapeHtml(book.title)}">
+        <img loading="lazy" src="${coverUrl(entry)}" alt="${escapeHtml(entry.title)}">
         <div class="badges">${badges.join('')}</div>
       </div>
       <div class="meta">
-        <p class="title">${escapeHtml(book.title)}</p>
-        <p class="authors">${escapeHtml(book.authors.join(', ') || '—')}</p>
-        <p class="isbn">${escapeHtml(book.isbn || '—')}</p>
+        <p class="title">${escapeHtml(entry.title)}</p>
+        <p class="authors">${escapeHtml(entry.authors.join(', ') || '—')}</p>
+        <p class="isbn">${escapeHtml(thirdLine || '—')}</p>
       </div>
     `;
 
     card.querySelector('.card-select-input').addEventListener('change', (e) => {
-      toggleSelect(book.id, e.target.checked);
+      toggleSelect(entry.uid, e.target.checked);
       card.classList.toggle('selected', e.target.checked);
     });
 
     card.addEventListener('click', (e) => {
-      if (e.target.closest('.badge.location')) {
+      // Le lien de la pastille fait son travail tout seul : on ne veut pas
+      // ouvrir la fiche par-dessus.
+      if (e.target.closest('a.badge')) { e.stopPropagation(); return; }
+      if (!isDoc && e.target.closest('.badge.location')) {
         e.stopPropagation();
-        openQuickLibrary(book);
+        openQuickLibrary(entry);
         return;
       }
       if (e.target.closest('.badge.genre')) {
         e.stopPropagation();
-        openQuickGenre(book);
+        openQuickGenre(entry);
         return;
       }
-      if (!selectMode) { openDetail(book.id); return; }
+      if (!selectMode) {
+        if (isDoc) openDocumentDetail(entry.id);
+        else openDetail(entry.id);
+        return;
+      }
       if (e.target.closest('.card-select')) return;
       const input = card.querySelector('.card-select-input');
       input.checked = !input.checked;
       input.dispatchEvent(new Event('change'));
     });
     return card;
+  }
+
+  function openDocumentDetail(id) {
+    return window.DocDetail.open({
+      id,
+      container: detailContent,
+      overlay: detailOverlay,
+      genreOptionsHtml: (selected) => genreOptionsHtml(selected),
+      onSaved: async () => {
+        await loadGenres();
+        await loadBooks();
+      },
+    });
   }
 
   async function openQuickLibrary(book) {
@@ -273,7 +537,7 @@
     const res = await fetch('/api/libraries');
     const libs = await res.json();
     quickLibrarySelect.innerHTML = '<option value="">Unknown room</option>' + libs
-      .filter((lib) => lib.name)
+      .filter((lib) => lib.name && !lib.virtual)
       .map((lib) => `<option value="${escapeHtml(lib.name)}" ${lib.name === (book.library || '') ? 'selected' : ''}>${escapeHtml(lib.name)} (${lib.count})</option>`)
       .join('');
     quickLibraryOverlay.classList.remove('hidden');
@@ -301,11 +565,13 @@
     }
   });
 
-  function openQuickGenre(book) {
-    quickGenreBookId = book.id;
-    quickGenreTitle.textContent = book.title;
+  function openQuickGenre(entry) {
+    quickGenreBookId = entry.id;
+    // Le genre existe des deux côtés, mais pas au même endroit de l'API.
+    quickGenreEndpoint = entry.kind === 'document' ? 'documents' : 'books';
+    quickGenreTitle.textContent = entry.title;
     quickGenreStatus.textContent = '';
-    quickGenreSelect.innerHTML = genreOptionsHtml(book.genre);
+    quickGenreSelect.innerHTML = genreOptionsHtml(entry.genre);
     quickGenreOverlay.classList.remove('hidden');
   }
 
@@ -314,7 +580,7 @@
     quickGenreSelect.disabled = true;
     quickGenreStatus.textContent = 'Saving…';
     try {
-      const res = await fetch(`/api/books/${quickGenreBookId}`, {
+      const res = await fetch(`/api/${quickGenreEndpoint}/${quickGenreBookId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ genre }),
@@ -333,6 +599,10 @@
 
   async function loadBooks() {
     const qs = buildQuery();
+    // La page de statistiques lit les mêmes paramètres que cette grille : le lien
+    // les emporte, pour que « filtrer ici puis regarder les chiffres » porte sur
+    // exactement la sélection qu'on a sous les yeux.
+    if (statsLink) statsLink.href = `/stats.html${qs ? '?' + qs : ''}`;
     status.textContent = 'Loading…';
     const res = await fetch(`/api/books${qs ? '?' + qs : ''}`);
     const books = await res.json();
@@ -358,14 +628,14 @@
   cancelSelectBtn.addEventListener('click', () => setSelectMode(false));
 
   selectAllCheckbox.addEventListener('change', () => {
-    const idsOnPage = currentBooks.map((b) => b.id);
+    const idsOnPage = currentBooks.map((b) => b.uid);
     if (selectAllCheckbox.checked) {
       idsOnPage.forEach((id) => selectedIds.add(id));
     } else {
       idsOnPage.forEach((id) => selectedIds.delete(id));
     }
     grid.querySelectorAll('.card').forEach((card) => {
-      const id = Number(card.dataset.id);
+      const id = card.dataset.id;
       const checked = selectedIds.has(id);
       card.classList.toggle('selected', checked);
       const input = card.querySelector('.card-select-input');
@@ -392,8 +662,10 @@
       if (!res.ok) throw new Error(data.error || 'Unknown error');
 
       if (data.failed && data.failed.length) {
-        const names = data.failed.map((f) => f.title || `#${f.id}`).join(', ');
-        alert(`${data.count} book(s) moved.\n${data.failed.length} book(s) not moved (a book with the same import identifier already exists in "${library}"): ${names}`);
+        // Chaque échec porte sa propre raison : conflit d'identifiant d'import
+        // pour un livre, absence de pièce physique pour un document du cloud.
+        const lines = data.failed.map((f) => `• ${f.title || `#${f.id}`} — ${f.error}`).join('\n');
+        alert(`${data.count} item(s) moved.\n${data.failed.length} not moved:\n${lines}`);
         data.moved.forEach((id) => selectedIds.delete(id));
         await loadLibraries();
         await loadBooks();
@@ -450,7 +722,7 @@
     const book = await bookRes.json();
     const libs = await libsRes.json();
     const libraryOptions = '<option value="">Unknown room</option>' + libs
-      .filter((lib) => lib.name)
+      .filter((lib) => lib.name && !lib.virtual)
       .map((lib) => `<option value="${escapeHtml(lib.name)}" ${lib.name === (book.library || '') ? 'selected' : ''}>${escapeHtml(lib.name)} (${lib.count})</option>`)
       .join('');
     detailContent.innerHTML = `
@@ -462,9 +734,14 @@
             <img class="cover" src="${coverUrl(book)}" alt="${escapeHtml(book.title)}">
             <span class="cover-edit-hint">Change cover</span>
           </label>
+          <!-- Les trois mêmes actions qu'au formulaire d'ajout, dans le même
+               ordre : recherche automatique, Google Images, photo de l'appareil.
+               Le 📷 déclenche le champ fichier caché dans l'étiquette au-dessus,
+               pour qu'il n'y ait qu'une seule entrée de fichier par fiche. -->
           <div class="cover-search-actions">
-            <button type="button" class="secondary icon-btn image-search-btn" title="Search for cover images">🔍</button>
+            <button type="button" class="secondary icon-btn image-search-btn" title="Search for a cover automatically">🔍</button>
             <button type="button" class="secondary icon-btn google-search-btn" title="Search Google Images">🌐</button>
+            <button type="button" class="secondary icon-btn cover-file-btn" title="Add a photo from this device">📷</button>
           </div>
         </div>
         <div class="detail-fields">
@@ -475,6 +752,10 @@
           ${fieldRow('Publisher', `<input type="text" class="field-input" data-field="publisher" value="${escapeHtml(book.publisher || '')}">`)}
           ${fieldRow('Year', `<input type="number" class="field-input" data-field="publishing_year" value="${escapeHtml(book.publishing_year || '')}">`)}
           ${fieldRow('Edition', `<input type="text" class="field-input" data-field="edition" value="${escapeHtml(book.edition || '')}">`)}
+          ${fieldRow('Language', `<select class="field-input" data-field="language">${languageOptionsHtml(book.language)}</select>`)}
+          ${fieldRow('Series', `<input type="text" class="field-input" data-field="series" value="${escapeHtml(book.series || '')}">`)}
+          ${fieldRow('No. in series', `<input type="number" step="any" class="field-input" data-field="series_index" value="${escapeHtml(book.series_index ?? '')}">`)}
+          ${fieldRow('Tags, comma-separated', `<input type="text" class="field-input" data-field="tags" value="${escapeHtml((book.tags || []).join(', '))}">`, { full: true })}
           ${fieldRow('ISBN', `
             <div class="isbn-row">
               <input type="text" class="field-input" data-field="isbn" inputmode="numeric" value="${escapeHtml(book.isbn || '')}">
@@ -540,136 +821,42 @@
     const imageSearchBtn = detailContent.querySelector('.image-search-btn');
     const imageSearchResults = detailContent.querySelector('.image-search-results');
 
-    function closeImageSearch() {
-      imageSearchResults.classList.add('hidden');
-      imageSearchResults.innerHTML = '';
-    }
-
     async function setCoverFromSearch(cover_base64) {
       try {
         await saveCover(cover_base64);
       } catch (err) {
         statusEl.textContent = err.message;
-        return;
+        return false; // le panneau reste ouvert : la vignette n'a pas été retenue
       }
-      closeImageSearch();
+      return true;
     }
 
-    imageSearchBtn.addEventListener('click', async () => {
-      const titleVal = detailContent.querySelector('[data-field="title"]').value;
-      const authorsVal = detailContent.querySelector('[data-field="authors"]').value;
-      const isbnVal = detailContent.querySelector('[data-field="isbn"]').value.trim();
-      const query = [titleVal, authorsVal].filter(Boolean).join(' ');
-      if (!query.trim() && !isbnVal) return;
-
+    async function searchCover({ sound = false } = {}) {
       imageSearchBtn.disabled = true;
-      imageSearchResults.classList.remove('hidden');
-      // Le panneau est en tête de la fiche : on remonte la modale pour que les
-      // vignettes arrivent sous les yeux, sans avoir à chercher plus bas.
-      const scroller = detailContent.closest('.modal');
-      if (scroller) scroller.scrollTo({ top: 0, behavior: 'smooth' });
-      // Les résultats de catalogue correspondent à une édition identifiée, les
-      // images du web sont une simple ressemblance : la provenance doit être
-      // visible avant de cliquer. Les deux grilles existent dès le départ pour
-      // pouvoir y verser les vignettes au fil de leur arrivée.
-      imageSearchResults.innerHTML = `
-        <p class="image-search-status search-progress">
-          <span class="spinner" aria-hidden="true"></span><span class="progress-label">Starting…</span>
-        </p>
-        <div class="image-search-section hidden" data-group="catalog">
-          <p class="image-search-group">From catalogs (matched edition)</p>
-          <div class="image-search-grid"></div>
-        </div>
-        <div class="image-search-section hidden" data-group="web">
-          <p class="image-search-group">From the web (check it matches)</p>
-          <div class="image-search-grid"></div>
-        </div>
-        <p class="image-search-status error search-problems"></p>
-        <button type="button" class="secondary image-search-close">None of these</button>
-      `;
-      imageSearchResults.querySelector('.image-search-close').addEventListener('click', closeImageSearch);
-
-      const progressEl = imageSearchResults.querySelector('.search-progress');
-      const labelEl = imageSearchResults.querySelector('.progress-label');
-      const problemsEl = imageSearchResults.querySelector('.search-problems');
-      const startedAt = Date.now();
-      const problems = [];
-      let pending = 0;
-      let found = 0;
-
-      const tick = setInterval(() => {
-        const seconds = Math.round((Date.now() - startedAt) / 1000);
-        labelEl.textContent = `Searching ${pending} source${pending !== 1 ? 's' : ''}… ${seconds}s · ${found} cover${found !== 1 ? 's' : ''} found`;
-      }, 250);
-
-      function addResult(result) {
-        found++;
-        const section = imageSearchResults.querySelector(`.image-search-section[data-group="${result.group === 'web' ? 'web' : 'catalog'}"]`);
-        section.classList.remove('hidden');
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'image-search-thumb';
-        btn.title = [result.title, result.source].filter(Boolean).join(' — ');
-        btn.innerHTML = `<img src="${result.cover_base64}" alt="${escapeHtml(result.title || '')}">`;
-        btn.addEventListener('click', () => setCoverFromSearch(result.cover_base64));
-        section.querySelector('.image-search-grid').appendChild(btn);
-      }
-
-      function handleEvent(event) {
-        if (event.type === 'start') pending = event.sources.length;
-        if (event.type === 'result') addResult(event.result);
-        if (event.type === 'source') {
-          pending = Math.max(0, pending - 1);
-          if (event.state === 'error') {
-            problems.push(`${event.name}: ${event.message}`);
-            problemsEl.textContent = problems.join(' · ');
-          }
-        }
-      }
-
       try {
-        const params = new URLSearchParams();
-        if (titleVal) params.set('title', titleVal);
-        if (authorsVal) params.set('authors', authorsVal);
-        if (isbnVal) params.set('isbn', isbnVal);
-
-        const res = await fetch(`/api/image-search?${params}`);
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop(); // la dernière peut être incomplète
-          for (const line of lines) {
-            if (line.trim()) handleEvent(JSON.parse(line));
-          }
-        }
-
-        const seconds = Math.round((Date.now() - startedAt) / 1000);
-        if (found) {
-          progressEl.textContent = `${found} cover${found !== 1 ? 's' : ''} found in ${seconds}s.`;
-        } else {
-          progressEl.textContent = problems.length
-            ? `No cover found in ${seconds}s — every source failed.`
-            : 'No results found.';
-        }
-      } catch (err) {
-        progressEl.textContent = '';
-        problems.push(err.message);
-        problemsEl.textContent = problems.join(' · ');
+        await runImageSearch({
+          host: imageSearchResults,
+          title: detailContent.querySelector('[data-field="title"]').value,
+          authors: detailContent.querySelector('[data-field="authors"]').value,
+          isbn: detailContent.querySelector('[data-field="isbn"]').value,
+          onPick: setCoverFromSearch,
+          sound,
+        });
       } finally {
-        clearInterval(tick);
         imageSearchBtn.disabled = false;
       }
-    });
+    }
+
+    imageSearchBtn.addEventListener('click', () => searchCover());
 
     detailContent.querySelector('.google-search-btn').addEventListener('click', () => {
       const titleVal = detailContent.querySelector('[data-field="title"]').value;
       const authorsVal = detailContent.querySelector('[data-field="authors"]').value;
-      const query = [titleVal, authorsVal].filter(Boolean).join(' ');
+      const isbnVal = detailContent.querySelector('[data-field="isbn"]').value.trim();
+      // À défaut de titre — une fiche à peine créée depuis un scan — l'ISBN reste
+      // une requête utile dans Google Images.
+      const query = [titleVal, authorsVal].filter(Boolean).join(' ').trim() || isbnVal;
+      if (!query) return;
       const url = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
       window.open(url, '_blank', 'noopener');
     });
@@ -752,6 +939,12 @@
         }
         beep('success');
         statusEl.textContent = 'Fields updated ✓';
+
+        // Le catalogue a répondu mais sans image, et la fiche n'en a toujours
+        // pas : la recherche enchaîne sans qu'on ait à la demander, maintenant
+        // que le titre et l'auteur qui viennent d'arriver donnent de quoi
+        // chercher. Elle attend le bip de succès pour ne pas se superposer.
+        if (!book.has_cover) searchCover({ sound: true });
       } catch (err) {
         if (seq !== detailIsbnLookupSeq) return;
         beep('fail');
@@ -771,6 +964,9 @@
 
     const fileInput = detailContent.querySelector('.cover-edit-input');
     const uploadError = detailContent.querySelector('.cover-upload-error');
+    // Le bouton 📷 et le clic sur la couverture ouvrent le même sélecteur : deux
+    // chemins vers un seul champ fichier, pas deux champs.
+    detailContent.querySelector('.cover-file-btn').addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', async () => {
       const file = fileInput.files[0];
       if (!file) return;
@@ -789,6 +985,18 @@
     });
 
     detailOverlay.classList.remove('hidden');
+
+    // Une fiche sans couverture lance la recherche d'elle-même : c'est la seule
+    // raison d'ouvrir une telle fiche neuf fois sur dix, et l'attente des
+    // sources court pendant qu'on relit le reste des champs. Avec le son, parce
+    // qu'on n'a pas forcément les yeux sur l'écran quand ça arrive. Une fois par
+    // livre et par session — rouvrir la même fiche ne rappelle pas les sources.
+    if (!book.has_cover
+      && !autoSearchAlreadyDone(book.id)
+      && coverSearchIsPossible({ title: book.title, authors: (book.authors || []).join(', '), isbn: book.isbn })) {
+      markAutoSearchDone(book.id);
+      searchCover({ sound: true });
+    }
   }
 
   document.querySelectorAll('[data-close]').forEach((btn) => {
@@ -824,6 +1032,10 @@
     coverPreview.dataset.base64 = '';
     addError.textContent = '';
     isbnLookupStatus.textContent = '';
+    // Les vignettes du livre précédent n'ont rien à faire au-dessus du suivant.
+    addImageSearchResults.classList.add('hidden');
+    addImageSearchResults.innerHTML = '';
+    isbnGoogleBtn.classList.add('hidden');
     addFormScannerUsed = false;
     libraryInput.value = lastLibrary;
     librarySelect.value = lastLibrary;
@@ -1026,6 +1238,13 @@
       }
       beep('success');
       isbnLookupStatus.textContent = 'Found ✓ — check and complete before saving.';
+
+      // Le cœur d'une séance de scan : le catalogue a rendu la fiche mais pas
+      // d'image, donc la recherche de couverture part immédiatement, avec le
+      // titre et l'auteur qui viennent d'arriver. Rien à cliquer — on scanne le
+      // livre suivant pendant que les sources répondent, et les deux bips disent
+      // quand c'est fini et s'il y a quelque chose à choisir.
+      if (!coverPreview.dataset.base64) searchCoverForAddForm({ sound: true });
     } catch (err) {
       if (seq !== isbnLookupSeq) return;
       beep('fail');
@@ -1054,6 +1273,37 @@
       coverPreview.dataset.base64 = reader.result;
     };
     reader.readAsDataURL(file);
+  });
+
+  // Les trois actions de couverture du formulaire d'ajout, identiques à celles
+  // de la fiche détaillée. Ici la vignette choisie n'est pas enregistrée tout de
+  // suite : elle attend l'enregistrement du livre, comme les autres champs.
+  async function searchCoverForAddForm({ sound = false } = {}) {
+    addImageSearchBtn.disabled = true;
+    try {
+      await runImageSearch({
+        host: addImageSearchResults,
+        title: addForm.elements.title.value,
+        authors: addForm.elements.authors.value,
+        isbn: isbnInput.value,
+        onPick: (cover_base64) => {
+          coverPreview.src = cover_base64;
+          coverPreview.dataset.base64 = cover_base64;
+        },
+        sound,
+      });
+    } finally {
+      addImageSearchBtn.disabled = false;
+    }
+  }
+
+  addImageSearchBtn.addEventListener('click', () => searchCoverForAddForm());
+  document.getElementById('add-cover-file-btn').addEventListener('click', () => coverInput.click());
+  document.getElementById('add-google-images-btn').addEventListener('click', () => {
+    const query = [addForm.elements.title.value, addForm.elements.authors.value]
+      .filter(Boolean).join(' ').trim() || isbnInput.value.trim();
+    if (!query) return;
+    window.open(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`, '_blank', 'noopener');
   });
 
   function buildAddPayload() {
@@ -1117,7 +1367,7 @@
     }
   });
 
-  Promise.all([loadLibraries(), loadGenres()]).then(loadBooks).then(() => {
+  Promise.all([loadLibraries(), loadGenres(), loadLanguages()]).then(loadBooks).then(() => {
     const params = new URLSearchParams(window.location.search);
     const openBookId = params.get('openBook');
     if (openBookId) {

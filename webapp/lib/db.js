@@ -2,8 +2,18 @@
 
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const { ensureDocumentsSchema } = require('./docs-db.js');
+const { ensureGenresSchema } = require('./genres.js');
 
-const DB_PATH = path.join(__dirname, '..', 'library.db');
+const DB_PATH = process.env.LIBRARY_DB
+  ? path.resolve(process.env.LIBRARY_DB)
+  : path.join(__dirname, '..', 'library.db');
+
+// Racine de la bibliothèque numérique : l'arborescence Calibre
+// (`<racine>/<Auteur>/<Titre> (<id>)/`) montée en volume. La base ne stocke que
+// des chemins relatifs à cette racine, pour qu'un déplacement du volume ne
+// demande aucune migration.
+const LIBRARY_ROOT = process.env.LIBRARY_ROOT || '/library';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS books (
@@ -28,6 +38,9 @@ CREATE TABLE IF NOT EXISTS books (
   cover BLOB,
   cover_mime TEXT,
   cover_rev INTEGER NOT NULL DEFAULT 0,
+  series TEXT,
+  series_index REAL,
+  language TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_books_library ON books(library);
@@ -49,13 +62,24 @@ function migrate(db) {
     db.exec('ALTER TABLE books ADD COLUMN cover_rev INTEGER NOT NULL DEFAULT 0');
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_books_genre ON books(genre)');
+
+  // Série, numéro dans la série et langue : ces notions valent autant pour un
+  // livre papier que pour un document, donc les deux tables les portent.
+  for (const [name, decl] of [['series', 'TEXT'], ['series_index', 'REAL'], ['language', 'TEXT']]) {
+    if (!columns.includes(name)) db.exec(`ALTER TABLE books ADD COLUMN ${name} ${decl}`);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_books_series ON books(series)');
 }
 
 function openDb() {
   const db = new DatabaseSync(DB_PATH);
   db.exec(SCHEMA);
   migrate(db);
+  ensureDocumentsSchema(db);
+  // Après le schéma des documents : le semis des genres compte leur usage sur
+  // les deux collections, donc la table `documents` doit exister.
+  ensureGenresSchema(db);
   return db;
 }
 
-module.exports = { openDb, DB_PATH };
+module.exports = { openDb, DB_PATH, LIBRARY_ROOT };

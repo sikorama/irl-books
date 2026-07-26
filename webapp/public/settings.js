@@ -57,7 +57,9 @@
 
   async function loadLibraries() {
     const res = await fetch('/api/libraries');
-    const libs = await res.json();
+    const libs = (await res.json()).filter((lib) => !lib.virtual);
+    // Le cloud est une pièce virtuelle : la renommer ne toucherait aucune fiche
+    // papier, donc elle n'a rien à faire dans l'outil de renommage en masse.
     renderCurrentRoom(libs);
     librariesList.innerHTML = '';
     for (const lib of libs) {
@@ -98,28 +100,160 @@
     }
   }
 
-  async function loadGenres() {
-    const res = await fetch('/api/genres');
-    const data = await res.json();
-    genresList.innerHTML = '';
-    const sorted = [...data.genres].sort((a, b) => b.count - a.count);
-    for (const g of sorted) {
-      const row = document.createElement('div');
-      row.className = 'library-row';
-      row.innerHTML = `
+  // --- Éditeur de genres ----------------------------------------------------
+  //
+  // Toute l'interface ne manipule que le `value` d'un genre. Les intitulés et les
+  // mots-clés sont des données éditables ; changer la langue d'affichage ne
+  // touche donc jamais à la classification, c'est le point de tout ce système.
+
+  const LANG_KEY = 'irl-books:lang';
+  let uiLang = localStorage.getItem(LANG_KEY) || 'fr';
+  let genreCatalog = { genres: [], langs: ['fr', 'en'], no_genre_count: 0 };
+
+  const langSelect = document.getElementById('lang-select');
+  const addGenreBtn = document.getElementById('add-genre-btn');
+  const genreEditStatus = document.getElementById('genre-edit-status');
+
+  function labelOf(g) {
+    return g.labels[uiLang] || g.labels.fr || g.labels.en || g.value;
+  }
+
+  function keywordsFor(g, lang) {
+    return (g.keywords[lang] || []).join(', ');
+  }
+
+  async function saveGenre(value, patch) {
+    genreEditStatus.textContent = 'Saving…';
+    const res = await fetch(`/api/genres/${encodeURIComponent(value)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Not saved (HTTP ${res.status})`);
+    genreEditStatus.textContent = 'Saved ✓';
+    return data;
+  }
+
+  function parseKeywordList(raw) {
+    return String(raw || '')
+      .split(/[,\n]/)
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  function renderGenreRow(g) {
+    const row = document.createElement('details');
+    row.className = 'genre-row';
+    const langs = genreCatalog.langs;
+    // `*` est proposé comme une langue de plus, parce que c'est exactement son
+    // rôle du point de vue de l'édition : une liste de mots-clés parmi d'autres.
+    const keywordLangs = [...langs, '*'];
+
+    row.innerHTML = `
+      <summary>
         <span class="library-count">${g.count}</span>
-        <span>${escapeHtml(g.label)}</span>
-      `;
-      genresList.appendChild(row);
-    }
+        <span class="genre-name">${escapeHtml(labelOf(g))}</span>
+        <code class="genre-slug">${escapeHtml(g.value)}</code>
+      </summary>
+      <div class="genre-body">
+        <div class="genre-labels">
+          ${langs.map((l) => `
+            <label>Label (${escapeHtml(l)})
+              <input type="text" data-label-lang="${escapeHtml(l)}" value="${escapeHtml(g.labels[l] || '')}">
+            </label>`).join('')}
+        </div>
+        ${keywordLangs.map((l) => `
+          <label class="genre-keywords">Keywords (${escapeHtml(l)}) — comma-separated
+            <textarea rows="2" data-kw-lang="${escapeHtml(l)}">${escapeHtml(keywordsFor(g, l))}</textarea>
+          </label>`).join('')}
+        <div class="genre-row-actions">
+          <button type="button" class="secondary genre-save">Save</button>
+          <button type="button" class="secondary genre-delete"${g.count ? ' disabled title="Move its items to another genre first"' : ''}>Delete</button>
+          <span class="genre-row-note">${g.count ? `${g.count} item(s) use this genre` : 'unused — can be deleted'}</span>
+        </div>
+      </div>
+    `;
+
+    row.querySelector('.genre-save').addEventListener('click', async () => {
+      const labels = {};
+      row.querySelectorAll('[data-label-lang]').forEach((i) => { labels[i.dataset.labelLang] = i.value; });
+      const keywords = {};
+      row.querySelectorAll('[data-kw-lang]').forEach((t) => { keywords[t.dataset.kwLang] = parseKeywordList(t.value); });
+      try {
+        await saveGenre(g.value, { labels, keywords });
+        await loadGenres();
+      } catch (e) {
+        genreEditStatus.textContent = e.message;
+      }
+    });
+
+    row.querySelector('.genre-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete the genre "${labelOf(g)}"? Its keywords are lost.`)) return;
+      genreEditStatus.textContent = 'Deleting…';
+      const res = await fetch(`/api/genres/${encodeURIComponent(g.value)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        genreEditStatus.textContent = data.error || `Not deleted (HTTP ${res.status})`;
+        return;
+      }
+      genreEditStatus.textContent = 'Deleted ✓';
+      await loadGenres();
+    });
+
+    return row;
+  }
+
+  async function loadGenres() {
+    const res = await fetch(`/api/genres?lang=${encodeURIComponent(uiLang)}`);
+    genreCatalog = await res.json();
+
+    const current = langSelect.value;
+    langSelect.innerHTML = genreCatalog.langs
+      .map((l) => `<option value="${escapeHtml(l)}">${escapeHtml(l)}</option>`).join('');
+    langSelect.value = current || uiLang;
+
+    genresList.innerHTML = '';
+    // Dans l'ordre d'évaluation, pas par nombre de fiches : c'est cet ordre qui
+    // décide quel genre gagne, donc c'est celui qu'il faut voir pour comprendre.
+    for (const g of genreCatalog.genres) genresList.appendChild(renderGenreRow(g));
+
     const noGenreRow = document.createElement('div');
-    noGenreRow.className = 'library-row';
+    noGenreRow.className = 'genre-row genre-row-static';
     noGenreRow.innerHTML = `
-      <span class="library-count">${data.no_genre_count}</span>
-      <span>No genre</span>
+      <span class="library-count">${genreCatalog.no_genre_count}</span>
+      <span class="genre-name">No genre</span>
     `;
     genresList.appendChild(noGenreRow);
   }
+
+  langSelect.addEventListener('change', async () => {
+    uiLang = langSelect.value;
+    localStorage.setItem(LANG_KEY, uiLang);
+    await loadGenres();
+  });
+
+  addGenreBtn.addEventListener('click', async () => {
+    const fr = prompt('French label for the new genre?');
+    if (!fr || !fr.trim()) return;
+    const en = prompt('English label? (optional)') || '';
+    genreEditStatus.textContent = 'Creating…';
+    try {
+      const res = await fetch('/api/genres', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labels: { fr: fr.trim(), en: en.trim() }, keywords: {} }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Not created (HTTP ${res.status})`);
+      // Créé en fin de liste, donc évalué en dernier : ses mots-clés ne peuvent
+      // pas détourner une classification existante sans intention explicite.
+      genreEditStatus.textContent = `Created "${data.value}" — added at the end of the evaluation order.`;
+      await loadGenres();
+    } catch (e) {
+      genreEditStatus.textContent = e.message;
+    }
+  });
 
   autoGenreBtn.addEventListener('click', async () => {
     const overwrite = genreOverwriteCheckbox.checked;
@@ -135,7 +269,10 @@
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Categorization failed.');
-      autoGenreStatus.textContent = `${data.updated} book${data.updated !== 1 ? 's' : ''} categorized out of ${data.total}.`;
+      const per = Object.entries(data.by_collection || {})
+        .map(([k, v]) => `${v.updated}/${v.total} ${k === 'books' ? 'books' : 'documents'}`)
+        .join(' · ');
+      autoGenreStatus.textContent = `${data.updated} item(s) categorized out of ${data.total}${per ? ` (${per})` : ''}.`;
       await loadGenres();
     } catch (e) {
       autoGenreStatus.textContent = `Error: ${e.message}`;
@@ -323,8 +460,67 @@
     }
   });
 
+  // --- Sous-sections -------------------------------------------------------
+  //
+  // Les quatre panneaux sont dans la page, un seul visible. La section active
+  // vit dans le fragment d'URL, pour qu'un rechargement — ou un signet — ramène
+  // là où on était.
+  //
+  // Seuls les doublons sont chargés à la demande : c'est le seul écran qui coûte
+  // un balayage de tout le catalogue, et on ne le paie donc que si on l'ouvre.
+
+  const PANELS = ['categories', 'duplicates', 'rooms', 'general'];
+  const tabs = [...document.querySelectorAll('.settings-tab')];
+  const loaded = new Set();
+
+  function activate(name, { push = true } = {}) {
+    const panel = PANELS.includes(name) ? name : PANELS[0];
+    for (const tab of tabs) {
+      const isCurrent = tab.dataset.panel === panel;
+      tab.classList.toggle('active', isCurrent);
+      tab.setAttribute('aria-selected', String(isCurrent));
+      // Un seul arrêt de tabulation dans la barre : les flèches circulent entre
+      // les onglets, comme dans n'importe quel jeu d'onglets.
+      tab.tabIndex = isCurrent ? 0 : -1;
+      document.getElementById(`panel-${tab.dataset.panel}`).classList.toggle('hidden', !isCurrent);
+    }
+    if (panel === 'duplicates' && !loaded.has('duplicates')) {
+      loaded.add('duplicates');
+      loadDuplicates();
+    }
+    if (push && location.hash.slice(1) !== panel) history.replaceState(null, '', `#${panel}`);
+  }
+
+  tabs.forEach((tab, index) => {
+    tab.addEventListener('click', () => activate(tab.dataset.panel));
+    tab.addEventListener('keydown', (e) => {
+      const delta = { ArrowRight: 1, ArrowLeft: -1, Home: -index, End: tabs.length - 1 - index }[e.key];
+      if (delta === undefined) return;
+      e.preventDefault();
+      const next = tabs[(index + delta + tabs.length) % tabs.length];
+      next.focus();
+      activate(next.dataset.panel);
+    });
+  });
+
+  // Renvoi d'un panneau à l'autre : la note des pièces pointe vers la pièce
+  // courante, qui est un réglage général.
+  for (const link of document.querySelectorAll('[data-goto-panel]')) {
+    link.addEventListener('click', () => {
+      activate(link.dataset.gotoPanel);
+      document.getElementById(`tab-${link.dataset.gotoPanel}`).focus();
+    });
+  }
+
+  window.addEventListener('hashchange', () => activate(location.hash.slice(1), { push: false }));
+
+  activate(location.hash.slice(1) || PANELS[0], { push: false });
+
+  // Les pièces alimentent deux panneaux (le renommage et le sélecteur de pièce
+  // courante) et les genres deux autres, donc les deux sont chargés d'emblée.
+  // Le travail sur les couvertures peut déjà tourner côté serveur : on se
+  // raccroche à son état sans attendre l'ouverture du panneau.
   loadLibraries();
   loadGenres();
-  loadDuplicates();
   resumeCoverJob();
 })();

@@ -11,70 +11,110 @@
   <h1>⚙️ Settings</h1>
   <div class="controls">
     <a href="/" class="secondary icon-btn" title="Back to library">←</a>
+    <a href="/stats.html" class="secondary icon-btn" title="Statistics">📊</a>
   </div>
+  <!-- Quatre sujets distincts plutôt qu'une seule colonne de huit sections : on
+       vient ici pour une chose à la fois, et la liste des doublons n'a rien à
+       faire entre l'éditeur de genres et l'export. -->
+  <nav class="settings-tabs" id="settings-tabs" role="tablist" aria-label="Settings sections">
+    <button type="button" class="settings-tab" role="tab" id="tab-categories" data-panel="categories" aria-controls="panel-categories">🏷️ Categories</button>
+    <button type="button" class="settings-tab" role="tab" id="tab-duplicates" data-panel="duplicates" aria-controls="panel-duplicates">👯 Duplicates</button>
+    <button type="button" class="settings-tab" role="tab" id="tab-rooms" data-panel="rooms" aria-controls="panel-rooms">🚪 Rooms</button>
+    <button type="button" class="settings-tab" role="tab" id="tab-general" data-panel="general" aria-controls="panel-general">🛠️ General</button>
+  </nav>
 </header>
 
 <main class="settings-main">
-  <section class="settings-section">
-    <h2>Current room</h2>
-    <p class="section-intro">Pre-fills the room on every new book, so a scanning session doesn't need it typed each time. Pick an existing room or name a new one. Filing a book in a different room makes that one current instead. This is remembered per device.</p>
-    <div class="isbn-row current-room-row">
-      <select id="current-room-select"><option value="">Choose a room…</option></select>
-      <input type="text" id="current-room-input" placeholder="New room">
-    </div>
-    <p id="current-room-status" class="export-status"></p>
-  </section>
 
-  <section class="settings-section">
-    <h2>Rooms</h2>
-    <p class="section-intro">Renaming a room updates every book in it.</p>
-    <div id="libraries-list" class="libraries-list"></div>
-  </section>
+  <!-- 1. Catégories : les intitulés, les mots-clés qui les attribuent, et la
+       passe qui applique ces règles au catalogue. -->
+  <div class="settings-panel" id="panel-categories" role="tabpanel" aria-labelledby="tab-categories">
+    <section class="settings-section">
+      <h2>Display language</h2>
+      <p class="section-intro">Only changes the labels shown for genres. A genre is identified by a stable internal key, so switching language never moves a book or a document from one genre to another. Remembered per device.</p>
+      <select id="lang-select"></select>
+    </section>
 
-  <section class="settings-section">
-    <h2>Genres</h2>
-    <p class="section-intro">Automatic categorization by keyword on title and author (gardening, esotericism, art, novels, comics…). Books already categorized are left untouched unless you check the box below.</p>
-    <div id="genres-list" class="libraries-list"></div>
-    <div class="checkbox-row genre-overwrite-row">
-      <label><input type="checkbox" id="genre-overwrite-checkbox"> Also recategorize books that already have a genre</label>
-    </div>
-    <button id="auto-genre-btn" class="primary icon-btn" title="Auto-categorize">🏷️</button>
-    <p id="auto-genre-status" class="export-status"></p>
-  </section>
+    <section class="settings-section">
+      <h2>Genres</h2>
+      <p class="section-intro">A genre has one label per language and one keyword list per language — but classification always matches against <em>every</em> keyword of <em>every</em> language, which is what makes it language-independent. Use the <code>*</code> list for anything that belongs to no language: author names, series, formats. Order matters: the first genre whose keyword is found wins, so specific genres must come before generic ones.</p>
+      <div id="genres-list" class="genre-editor"></div>
+      <div class="button-row">
+        <button id="add-genre-btn" class="secondary">+ New genre</button>
+      </div>
+      <p id="genre-edit-status" class="export-status"></p>
+    </section>
 
-  <section class="settings-section">
-    <h2>Duplicates</h2>
-    <p class="section-intro">Books sharing the same ISBN (or import identifier). Groups in red have different titles: it's almost always an ISBN error in the source data, not a real duplicate.</p>
-    <div id="duplicates-list"></div>
-  </section>
+    <section class="settings-section">
+      <h2>Auto-categorize</h2>
+      <p class="section-intro">Applies the keyword rules above to titles and authors. Runs on both collections — physical books and cloud documents. Items already categorized are left untouched unless you check the box.</p>
+      <div class="checkbox-row genre-overwrite-row">
+        <label><input type="checkbox" id="genre-overwrite-checkbox"> Also recategorize items that already have a genre</label>
+      </div>
+      <button id="auto-genre-btn" class="primary icon-btn" title="Auto-categorize">🏷️</button>
+      <p id="auto-genre-status" class="export-status"></p>
+    </section>
+  </div>
 
-  <section class="settings-section">
-    <h2>Cover quality</h2>
-    <p class="section-intro">Most covers imported before the fix are 128px-wide thumbnails. This re-asks Open Library and Google Books for a bigger version of every cover narrower than the threshold, and only replaces one when a clearly wider image comes back. Books without an ISBN are skipped. It takes a few minutes — you can leave the page, the job keeps running.</p>
-    <div class="checkbox-row cover-upgrade-row">
-      <label>Upgrade covers narrower than
-        <input type="number" id="cover-min-width" value="400" min="50" max="4000" step="50"> px
-      </label>
-      <label><input type="checkbox" id="cover-dry-run"> Simulate (report only, write nothing)</label>
-    </div>
-    <div class="button-row">
-      <button id="upgrade-covers-btn" class="primary icon-btn" title="Upgrade covers">🖼️</button>
-      <button id="cancel-covers-btn" class="secondary icon-btn hidden" title="Stop">✋</button>
-    </div>
-    <div id="cover-progress" class="cover-progress hidden">
-      <div class="progress-track"><div class="progress-fill" id="cover-progress-fill"></div></div>
-      <p class="progress-text" id="cover-progress-text"></p>
-      <ul class="progress-log" id="cover-progress-log"></ul>
-    </div>
-    <p id="upgrade-covers-status" class="export-status"></p>
-  </section>
+  <!-- 2. Doublons. -->
+  <div class="settings-panel" id="panel-duplicates" role="tabpanel" aria-labelledby="tab-duplicates">
+    <section class="settings-section">
+      <h2>Duplicates</h2>
+      <p class="section-intro">Books sharing the same ISBN (or import identifier). Groups in red have different titles: it's almost always an ISBN error in the source data, not a real duplicate.</p>
+      <div id="duplicates-list"></div>
+    </section>
+  </div>
 
-  <section class="settings-section">
-    <h2>Export to Calibre</h2>
-    <p class="section-intro">Generates one EPUB per book (full metadata, generated cover if missing) in a directory ready to import into Calibre.</p>
-    <button id="export-calibre-btn" class="primary icon-btn" title="Export">📤</button>
-    <p id="export-status" class="export-status"></p>
-  </section>
+  <!-- 3. Pièces : renommage en masse. La pièce courante, elle, est un réglage de
+       cet appareil et vit dans les réglages généraux. -->
+  <div class="settings-panel" id="panel-rooms" role="tabpanel" aria-labelledby="tab-rooms">
+    <section class="settings-section">
+      <h2>Rooms</h2>
+      <p class="section-intro">Renaming a room updates every book in it. The room new books are filed in by default is a per-device setting, under <button type="button" class="link-btn" data-goto-panel="general">General</button>.</p>
+      <div id="libraries-list" class="libraries-list"></div>
+    </section>
+  </div>
+
+  <!-- 4. Réglages généraux, y compris la pièce courante. -->
+  <div class="settings-panel" id="panel-general" role="tabpanel" aria-labelledby="tab-general">
+    <section class="settings-section">
+      <h2>Current room</h2>
+      <p class="section-intro">Pre-fills the room on every new book, so a scanning session doesn't need it typed each time. Pick an existing room or name a new one. Filing a book in a different room makes that one current instead. This is remembered per device.</p>
+      <div class="isbn-row current-room-row">
+        <select id="current-room-select"><option value="">Choose a room…</option></select>
+        <input type="text" id="current-room-input" placeholder="New room">
+      </div>
+      <p id="current-room-status" class="export-status"></p>
+    </section>
+
+    <section class="settings-section">
+      <h2>Cover quality</h2>
+      <p class="section-intro">Most covers imported before the fix are 128px-wide thumbnails. This re-asks Open Library and Google Books for a bigger version of every cover narrower than the threshold, and only replaces one when a clearly wider image comes back. Books without an ISBN are skipped. It takes a few minutes — you can leave the page, the job keeps running.</p>
+      <div class="checkbox-row cover-upgrade-row">
+        <label>Upgrade covers narrower than
+          <input type="number" id="cover-min-width" value="400" min="50" max="4000" step="50"> px
+        </label>
+        <label><input type="checkbox" id="cover-dry-run"> Simulate (report only, write nothing)</label>
+      </div>
+      <div class="button-row">
+        <button id="upgrade-covers-btn" class="primary icon-btn" title="Upgrade covers">🖼️</button>
+        <button id="cancel-covers-btn" class="secondary icon-btn hidden" title="Stop">✋</button>
+      </div>
+      <div id="cover-progress" class="cover-progress hidden">
+        <div class="progress-track"><div class="progress-fill" id="cover-progress-fill"></div></div>
+        <p class="progress-text" id="cover-progress-text"></p>
+        <ul class="progress-log" id="cover-progress-log"></ul>
+      </div>
+      <p id="upgrade-covers-status" class="export-status"></p>
+    </section>
+
+    <section class="settings-section">
+      <h2>Export to Calibre</h2>
+      <p class="section-intro">Generates one EPUB per book (full metadata, generated cover if missing) in a directory ready to import into Calibre.</p>
+      <button id="export-calibre-btn" class="primary icon-btn" title="Export">📤</button>
+      <p id="export-status" class="export-status"></p>
+    </section>
+  </div>
 </main>
 
 <script src="/settings.js"></script>

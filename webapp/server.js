@@ -5,11 +5,15 @@ const https = require('https');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { openDb } = require('./lib/db.js');
+const { openDb, DB_PATH, LIBRARY_ROOT } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
-const { GENRES, guessGenre } = require('./lib/categorize.js');
+const genres = require('./lib/genres.js');
+const { normalizeLang, languageCatalog } = require('./lib/languages.js');
 const { lookupIsbn, imageSearchStream, hasGoogleBooksKey, describeGoogleBooksKey } = require('./lib/lookup.js');
 const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
+const documents = require('./lib/documents.js');
+const fts = require('./lib/docs-fts.js');
+const { indexDocuments, findCandidates } = require('./lib/text-index.js');
 
 // Usage: node server.js [--http]
 function parseArgs() {
@@ -72,6 +76,9 @@ function decodeCoverBase64(coverBase64) {
 
 function rowToBook(row) {
   return {
+    uid: `b${row.id}`,
+    kind: 'book',
+    cover_url: `/api/books/${row.id}/cover?v=${row.cover_rev || 0}`,
     id: row.id,
     library: row.library,
     ident: row.ident,
@@ -90,6 +97,9 @@ function rowToBook(row) {
     rating: row.rating,
     tags: JSON.parse(row.tags || '[]'),
     genre: row.genre,
+    series: row.series,
+    series_index: row.series_index,
+    language: row.language,
     has_cover: row.cover !== null,
     cover_rev: row.cover_rev || 0,
     created_at: row.created_at,
@@ -99,15 +109,19 @@ function rowToBook(row) {
 const BOOK_COLUMNS = `
   id, library, ident, isbn, title, authors, publisher, publishing_year,
   edition, notes, own, want, redd, loaned, loaned_to, rating, tags, genre,
-  cover, cover_rev, created_at
+  series, series_index, language, cover, cover_rev, created_at
 `;
 
-function listBooks(query) {
+// Extrait de `listBooks` pour que les statistiques portent sur exactement la même
+// sélection que la grille : un seul endroit décide ce que « les titres filtrés »
+// veut dire, donc le total affiché en haut de la page de stats est par
+// construction le nombre de vignettes de la bibliothèque.
+function bookFilter(query) {
   const clauses = [];
   const params = {};
 
   if (query.q) {
-    clauses.push('(title LIKE @q OR authors LIKE @q OR publisher LIKE @q OR isbn LIKE @q)');
+    clauses.push('(title LIKE @q OR authors LIKE @q OR publisher LIKE @q OR isbn LIKE @q OR series LIKE @q OR tags LIKE @q)');
     params.q = `%${query.q}%`;
   }
   if (query.library) {
@@ -133,40 +147,268 @@ function listBooks(query) {
     clauses.push("(isbn IS NULL OR isbn = '')");
   }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+function listBooks(query) {
+  const { where, params } = bookFilter(query);
   const sql = `SELECT ${BOOK_COLUMNS} FROM books ${where} ORDER BY title COLLATE NOCASE ASC`;
   const rows = db.prepare(sql).all(params);
   return rows.map(rowToBook);
 }
 
+// Pendant papier de `documents.documentStats`. Le regroupement est fait par
+// SQLite : `listBooks` tirerait aussi les couvertures — plusieurs mégaoctets de
+// BLOB — pour n'en garder qu'un booléen.
+function bookStats(query) {
+  const { where, params } = bookFilter(query);
+  const groupBy = (expr) => db
+    .prepare(`SELECT ${expr} AS k, COUNT(*) AS c FROM books ${where} GROUP BY k`)
+    .all(params)
+    .map((r) => ({ key: r.k, count: r.c }));
+
+  const totals = db.prepare(`
+    SELECT COUNT(*) AS total,
+           SUM(cover IS NOT NULL) AS with_cover,
+           SUM(isbn IS NOT NULL AND isbn != '') AS with_isbn,
+           SUM(publishing_year IS NOT NULL) AS with_year,
+           SUM(genre IS NOT NULL) AS with_genre,
+           SUM(authors IS NOT NULL AND authors != '[]') AS with_author,
+           SUM(loaned) AS loaned
+    FROM books ${where}
+  `).get(params);
+
+  return {
+    totals,
+    lists: db.prepare(`SELECT authors, tags FROM books ${where}`).all(params),
+    year: groupBy('publishing_year'),
+    genre: groupBy('genre'),
+    room: groupBy('library'),
+    publisher: groupBy("NULLIF(TRIM(COALESCE(publisher, '')), '')"),
+    language: groupBy("NULLIF(TRIM(COALESCE(language, '')), '')"),
+    rating: groupBy('rating'),
+  };
+}
+
+// Le catalogue réunit les fiches papier et le cloud. Les filtres propres au
+// papier (prêt, ISBN manquant) excluent donc le cloud plutôt que de le filtrer
+// sur des colonnes qui n'ont pas de sens pour un fichier.
+const CLOUD = documents.CLOUD_ROOM;
+
+function wantsBooks(query) {
+  return !query.library || query.library !== CLOUD;
+}
+
+function wantsDocuments(query) {
+  if (query.library && query.library !== CLOUD) return false;
+  // « prêté » et « sans ISBN » sont des notions de livre physique : les activer
+  // veut dire qu'on cherche dans le papier.
+  if (query.loaned === '1' || query.loaned === '0') return false;
+  if (query.no_isbn === '1') return false;
+  return true;
+}
+
+// Les actions groupées reçoivent des `uid` (« b12 », « d34 ») parce qu'une
+// sélection peut mêler les deux collections. Les identifiants purement
+// numériques sont acceptés et traités comme des livres, pour ne pas casser un
+// appel plus ancien.
+function splitUids(rawIds) {
+  const books = [];
+  const docs = [];
+  for (const raw of Array.isArray(rawIds) ? rawIds : []) {
+    const value = String(raw);
+    const m = /^([bd])(\d+)$/.exec(value);
+    if (m) {
+      (m[1] === 'b' ? books : docs).push(Number(m[2]));
+      continue;
+    }
+    const n = Number(value);
+    if (Number.isInteger(n)) books.push(n);
+  }
+  return { books, documents: docs };
+}
+
+function listCatalog(query) {
+  const entries = [];
+  if (wantsBooks(query)) entries.push(...listBooks(query));
+  if (wantsDocuments(query)) {
+    entries.push(...documents
+      .listDocuments(db, { q: query.q, genre: query.genre, no_cover: query.no_cover })
+      .map(documents.toCatalogEntry));
+  }
+  // Un seul tri sur l'ensemble, sinon les deux collections se retrouveraient
+  // empilées l'une après l'autre. `localeCompare` plutôt que le COLLATE NOCASE
+  // de SQLite, qui ne connaît que l'ASCII et classerait « Édition » après « Zoo ».
+  entries.sort((a, b) => String(a.title).localeCompare(String(b.title), 'fr', { sensitivity: 'base' }));
+  return entries;
+}
+
+// --- Statistiques ---------------------------------------------------------
+//
+// Les agrégats portent sur la sélection décrite par les mêmes paramètres que la
+// grille, et réunissent les deux collections quand la sélection les contient
+// toutes les deux — un catalogue, un total.
+//
+// Chaque dimension est renvoyée triée et déjà réduite à ce qui est lisible : la
+// page ne fait plus que dessiner. Les entrées sans valeur ne sont pas jetées
+// mais comptées à part (`unknown`) : « 247 titres sans année » est une
+// information sur le catalogue, alors qu'une barre « (vide) » au milieu du
+// graphe n'en est pas une.
+
+function mergeCounts(...groups) {
+  const merged = new Map();
+  let unknown = 0;
+  for (const group of groups) {
+    for (const { key, count } of group || []) {
+      if (key === null || key === undefined || key === '') {
+        unknown += count;
+        continue;
+      }
+      merged.set(key, (merged.get(key) || 0) + count);
+    }
+  }
+  return { merged, unknown };
+}
+
+function countedList(groups, { sort = 'count', limit = 0, label = (k) => String(k) } = {}) {
+  const { merged, unknown } = mergeCounts(...groups);
+  let items = [...merged.entries()].map(([key, count]) => ({ key: String(key), label: label(key), count }));
+  if (sort === 'key') items.sort((a, b) => String(a.key).localeCompare(String(b.key), 'fr', { numeric: true }));
+  else items.sort((a, b) => b.count - a.count || String(a.label).localeCompare(String(b.label), 'fr'));
+
+  // Au-delà d'une dizaine de barres un classement ne se lit plus, et la méthode
+  // de dataviz refuse d'inventer des couleurs pour une queue longue : le reste
+  // est replié dans un « Autres » explicite, qui garde le total juste.
+  let other = 0;
+  if (limit && items.length > limit) {
+    other = items.slice(limit).reduce((sum, i) => sum + i.count, 0);
+    items = items.slice(0, limit);
+  }
+  return { items, unknown, other, distinct: merged.size };
+}
+
+// Auteurs et étiquettes sont des tableaux JSON : une fiche à trois auteurs
+// compte pour les trois. Les totaux de ces deux dimensions dépassent donc le
+// nombre de titres, ce que la page dit explicitement.
+function countJsonLists(rowSets, field) {
+  const counts = new Map();
+  let none = 0;
+  for (const rows of rowSets) {
+    for (const row of rows || []) {
+      let values;
+      try {
+        values = JSON.parse(row[field] || '[]');
+      } catch {
+        values = [];
+      }
+      if (!Array.isArray(values)) values = [];
+      const cleaned = values.map((v) => String(v).trim()).filter(Boolean);
+      if (!cleaned.length) {
+        none += 1;
+        continue;
+      }
+      for (const value of new Set(cleaned)) counts.set(value, (counts.get(value) || 0) + 1);
+    }
+  }
+  return { counts, none };
+}
+
+function jsonListStats(rowSets, field, limit) {
+  const { counts, none } = countJsonLists(rowSets, field);
+  const group = [...counts.entries()].map(([key, count]) => ({ key, count }));
+  const stats = countedList([group], { limit });
+  stats.unknown = none;
+  stats.distinct = counts.size;
+  return stats;
+}
+
+function computeStats(query, lang) {
+  const books = wantsBooks(query) ? bookStats(query) : null;
+  const docs = wantsDocuments(query) ? documents.documentStats(db, query) : null;
+
+  const bookTotals = books ? books.totals : {};
+  const docTotals = docs ? docs.totals : {};
+  const sum = (field) => Number(bookTotals[field] || 0) + Number(docTotals[field] || 0);
+
+  const genreCatalog = getGenres(lang);
+  const genreLabels = new Map(genreCatalog.genres.map((g) => [g.value, g.label]));
+
+  // Le cloud est une pièce du catalogue : il apparaît dans la répartition par
+  // pièce comme les autres, avec le nombre de documents sélectionnés.
+  const cloudRoom = docTotals.total ? [{ key: CLOUD, count: docTotals.total }] : [];
+
+  return {
+    total: sum('total'),
+    books: Number(bookTotals.total || 0),
+    documents: Number(docTotals.total || 0),
+    coverage: {
+      with_cover: sum('with_cover'),
+      with_isbn: sum('with_isbn'),
+      with_year: sum('with_year'),
+      with_genre: sum('with_genre'),
+      with_author: sum('with_author'),
+      loaned: Number(bookTotals.loaned || 0),
+    },
+    pages: Number(docTotals.pages || 0),
+    bytes: Number(docTotals.bytes || 0),
+    by_year: countedList([books?.year, docs?.year], { sort: 'key' }),
+    by_genre: countedList([books?.genre, docs?.genre], { label: (k) => genreLabels.get(k) || k }),
+    by_room: countedList([books?.room, cloudRoom]),
+    by_publisher: countedList([books?.publisher, docs?.publisher], { limit: 12 }),
+    by_language: countedList([books?.language, docs?.language]),
+    by_rating: countedList([books?.rating, docs?.rating], { sort: 'key' }),
+    by_format: countedList([docs?.format]),
+    by_author: jsonListStats([books?.lists, docs?.lists], 'authors', 12),
+    by_tag: jsonListStats([books?.lists, docs?.lists], 'tags', 12),
+  };
+}
+
 function getLibraries() {
-  return db.prepare('SELECT library, COUNT(*) c FROM books GROUP BY library ORDER BY library COLLATE NOCASE')
+  const rooms = db.prepare('SELECT library, COUNT(*) c FROM books GROUP BY library ORDER BY library COLLATE NOCASE')
     .all()
     .map((r) => ({ name: r.library, count: r.c }));
+  const cloudCount = db.prepare('SELECT COUNT(*) c FROM documents').get().c;
+  if (cloudCount) rooms.push({ name: CLOUD, count: cloudCount, virtual: true });
+  return rooms;
 }
 
-function getGenres() {
-  const counts = new Map(
-    db.prepare('SELECT genre, COUNT(*) c FROM books GROUP BY genre').all()
-      .map((r) => [r.genre, r.c]),
-  );
-  const catalog = GENRES.map((g) => ({ ...g, count: counts.get(g.value) || 0 }));
-  const noGenreCount = counts.get(null) || 0;
-  return { genres: catalog, no_genre_count: noGenreCount };
+// Les compteurs couvrent tout le catalogue, papier et cloud : une seule pièce de
+// plus ne doit pas donner deux totaux différents selon la page qu'on regarde. La
+// langue ne sert qu'à résoudre l'intitulé affiché — les compteurs, eux, portent
+// sur le slug, donc ils ne bougent pas d'une langue à l'autre.
+function getGenres(lang) {
+  return genres.catalogFor(db, lang);
 }
 
-function autoGenre(overwrite) {
-  const rows = db.prepare('SELECT id, title, authors, genre FROM books').all();
-  const stmt = db.prepare('UPDATE books SET genre = ? WHERE id = ?');
-  let updated = 0;
-  for (const row of rows) {
-    if (row.genre && !overwrite) continue;
-    const guessed = guessGenre({ title: row.title, authors: JSON.parse(row.authors || '[]') });
-    if (!guessed || guessed === row.genre) continue;
-    stmt.run(guessed, row.id);
-    updated++;
+// La classification automatique tourne sur les deux collections : les mots-clés
+// anglais ajoutés au catalogue n'auraient sinon aucun effet sur les 826
+// documents anglophones du cloud.
+//
+// Les règles sont compilées une fois pour toute la passe, pas une fois par
+// fiche : sur 2789 entrées la différence est franche.
+function autoGenre(overwrite, { collections = ['books', 'documents'] } = {}) {
+  const rules = genres.compiledRules(db);
+  const { matchGenre } = require('./lib/categorize.js');
+  const result = { updated: 0, total: 0, by_collection: {} };
+
+  for (const table of collections) {
+    const rows = db.prepare(`SELECT id, title, authors, genre FROM ${table}`).all();
+    const stmt = db.prepare(`UPDATE ${table} SET genre = ? WHERE id = ?`);
+    let updated = 0;
+    for (const row of rows) {
+      if (row.genre && !overwrite) continue;
+      let authors = [];
+      try { authors = JSON.parse(row.authors || '[]'); } catch { authors = []; }
+      const guessed = matchGenre(rules, { title: row.title, authors });
+      if (!guessed || guessed === row.genre) continue;
+      stmt.run(guessed, row.id);
+      updated++;
+    }
+    result.by_collection[table] = { updated, total: rows.length };
+    result.updated += updated;
+    result.total += rows.length;
   }
-  return { updated, total: rows.length };
+  return result;
 }
 
 function getDuplicates() {
@@ -308,6 +550,78 @@ function startCoverUpgrade({ minWidth, dryRun }) {
   return job;
 }
 
+// L'indexation des 1501 PDF dure vingt à quarante minutes : elle tourne en tâche
+// de fond et la page interroge son état, exactement comme l'upgrade des
+// couvertures. Un seul travail à la fois, conservé en mémoire après la fin pour
+// que le résultat survive à un rechargement de page.
+const INDEX_JOB_LOG_MAX = 80;
+let indexJob = null;
+
+function startTextIndex({ force, limit }) {
+  const job = {
+    running: true,
+    cancelled: false,
+    force,
+    total: null,
+    processed: 0,
+    indexed: 0,
+    empty: 0,
+    failed: 0,
+    truncated: 0,
+    chars: 0,
+    current: null,
+    started_at: new Date().toISOString(),
+    log: [],
+    error: null,
+    finished: false,
+  };
+  indexJob = job;
+
+  // Lancé sans être attendu : la réponse 202 part immédiatement et le travail se
+  // poursuit en tâche de fond. L'extraction passe par `spawn`, donc poppler
+  // tourne dans un autre processus et le serveur reste joignable pendant les
+  // quarante minutes — c'est ce qui permet de suivre la progression depuis la
+  // page pendant que ça travaille.
+  (async () => {
+    try {
+      const totals = await indexDocuments(db, {
+        root: LIBRARY_ROOT,
+        dbPath: DB_PATH,
+        force,
+        limit,
+        onStart: (total) => { job.total = total; },
+        onProgress: (event, totals2) => {
+          Object.assign(job, {
+            processed: totals2.processed,
+            indexed: totals2.indexed,
+            empty: totals2.empty,
+            failed: totals2.failed,
+            truncated: totals2.truncated,
+            chars: totals2.chars,
+            current: { id: event.id, title: event.title },
+          });
+          if (event.status === 'indexed') return;
+          job.log.push({
+            id: event.id, title: event.title, status: event.status, error: event.error || null,
+          });
+          if (job.log.length > INDEX_JOB_LOG_MAX) job.log.shift();
+        },
+        shouldStop: () => job.cancelled,
+      });
+      job.remaining = findCandidates(db, { force: false }).length;
+      Object.assign(job, totals);
+    } catch (e) {
+      job.error = e.message;
+    } finally {
+      job.running = false;
+      job.current = null;
+      job.finished = true;
+    }
+  })();
+
+  return job;
+}
+
 function serveStatic(req, res, urlPath) {
   let rel = urlPath === '/' ? '/index.html' : urlPath;
   rel = rel.split('?')[0];
@@ -329,20 +643,219 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
+// --- Collection numérique -------------------------------------------------
+//
+// Les documents forment une collection à part : corpus disjoint des fiches
+// papier, colonnes différentes, filtres différents. Seul le socle (grille,
+// recherche, genres) est commun.
+
+async function handleDocumentsApi(req, res, url, parts) {
+  // GET /api/documents  (in_text=1 pour chercher dans le contenu)
+  if (req.method === 'GET' && parts.length === 2) {
+    const query = Object.fromEntries(url.searchParams.entries());
+    if (query.in_text === '1' && query.q) {
+      try {
+        return sendJson(res, 200, documents.searchDocumentsText(db, DB_PATH, query.q, query));
+      } catch (e) {
+        return sendJson(res, 500, { error: `Full-text search failed: ${e.message}` });
+      }
+    }
+    return sendJson(res, 200, documents.listDocuments(db, query));
+  }
+
+  // Pilotage de l'indexation : GET l'état, POST pour lancer, POST /cancel pour
+  // interrompre. Même protocole que /api/covers/upgrade.
+  if (parts.length >= 3 && parts[2] === 'index') {
+    if (req.method === 'GET' && parts.length === 3) {
+      const state = indexJob || { running: false, finished: false };
+      let pending = null;
+      try {
+        fts.attachFts(db, DB_PATH);
+        pending = findCandidates(db, { force: false }).length;
+      } catch {
+        pending = null;
+      }
+      return sendJson(res, 200, { ...state, pending });
+    }
+    if (req.method === 'POST' && parts.length === 4 && parts[3] === 'cancel') {
+      if (!indexJob || !indexJob.running) return sendJson(res, 409, { error: 'No indexing in progress.' });
+      indexJob.cancelled = true;
+      return sendJson(res, 200, indexJob);
+    }
+    if (req.method === 'POST' && parts.length === 3) {
+      if (indexJob && indexJob.running) {
+        return sendJson(res, 409, { error: 'An indexing run is already in progress.' });
+      }
+      let payload = {};
+      try {
+        const raw = await readBody(req);
+        if (raw.length) payload = JSON.parse(raw.toString('utf8'));
+      } catch (e) {
+        return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+      }
+      const limit = Number.isFinite(Number(payload.limit)) && Number(payload.limit) > 0
+        ? Math.trunc(Number(payload.limit))
+        : Infinity;
+      return sendJson(res, 202, startTextIndex({ force: !!payload.force, limit }));
+    }
+  }
+
+  // GET /api/documents/facets
+  if (req.method === 'GET' && parts.length === 3 && parts[2] === 'facets') {
+    let index = null;
+    try {
+      fts.attachFts(db, DB_PATH);
+      index = { ...fts.stats(db), pending: findCandidates(db, { force: false }).length };
+    } catch {
+      index = null;
+    }
+    return sendJson(res, 200, { ...documents.getFacets(db), library_root: LIBRARY_ROOT, index });
+  }
+
+  // POST /api/documents/set-genre
+  if (req.method === 'POST' && parts.length === 3 && parts[2] === 'set-genre') {
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch (e) {
+      return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+    }
+    const ids = Array.isArray(payload.ids) ? payload.ids.map(Number).filter(Number.isInteger) : [];
+    const genre = payload.genre ? String(payload.genre).trim() || null : null;
+    if (!ids.length) return sendJson(res, 400, { error: 'No document selected.' });
+    const stmt = db.prepare("UPDATE documents SET genre = ?, updated_at = datetime('now') WHERE id = ?");
+    for (const id of ids) stmt.run(genre, id);
+    return sendJson(res, 200, { ok: true, count: ids.length, updated: ids });
+  }
+
+  // GET /api/documents/:id/cover
+  if (req.method === 'GET' && parts.length === 4 && parts[3] === 'cover') {
+    const abs = documents.coverPath(db, LIBRARY_ROOT, Number(parts[2]));
+    if (!abs) {
+      // Pas de cover.jpg : la vignette générique. Elle est prise dans `public/`
+      // et non dans `db-alexandria/`, que .dockerignore exclut de l'image —
+      // sinon les 117 documents sans couverture renverraient un 404 en Docker.
+      return fs.readFile(path.join(PUBLIC_DIR, 'nocover.jpg'), (err, data) => {
+        if (err) { res.writeHead(404); return res.end(); }
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-cache' });
+        res.end(data);
+      });
+    }
+    return documents.sendFile(req, res, abs, {
+      contentType: 'image/jpeg',
+      filename: 'cover.jpg',
+    });
+  }
+
+  // GET /api/documents/:id/file[?format=PDF][&download=1]
+  if (req.method === 'GET' && parts.length === 4 && parts[3] === 'file') {
+    const id = Number(parts[2]);
+    const file = documents.filePath(db, LIBRARY_ROOT, id, url.searchParams.get('format'));
+    if (!file) return sendJson(res, 404, { error: 'No such file for this document' });
+    return documents.sendFile(req, res, file.abs, {
+      contentType: documents.FILE_TYPES[file.format],
+      filename: file.name,
+      download: url.searchParams.get('download') === '1',
+    });
+  }
+
+  // GET /api/documents/:id
+  if (req.method === 'GET' && parts.length === 3) {
+    const doc = documents.getDocument(db, Number(parts[2]));
+    if (!doc) return sendJson(res, 404, { error: 'not found' });
+    return sendJson(res, 200, doc);
+  }
+
+  // PATCH /api/documents/:id
+  if (req.method === 'PATCH' && parts.length === 3) {
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch (e) {
+      return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+    }
+    const result = documents.updateDocument(db, Number(parts[2]), payload);
+    if (!result) return sendJson(res, 404, { error: 'not found' });
+    if (result.error) return sendJson(res, 400, { error: result.error });
+    return sendJson(res, 200, result.document);
+  }
+
+  return sendJson(res, 404, { error: 'Unknown route' });
+}
+
 async function handleApi(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
 
+  if (parts[1] === 'documents') {
+    return handleDocumentsApi(req, res, url, parts);
+  }
+
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'books') {
     const query = Object.fromEntries(url.searchParams.entries());
-    return sendJson(res, 200, listBooks(query));
+    return sendJson(res, 200, listCatalog(query));
+  }
+
+  // Mêmes paramètres de filtre que /api/books, agrégés au lieu d'être listés.
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'stats') {
+    const query = Object.fromEntries(url.searchParams.entries());
+    return sendJson(res, 200, computeStats(query, query.lang || 'fr'));
   }
 
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'libraries') {
     return sendJson(res, 200, getLibraries());
   }
 
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'languages') {
+    const lang = url.searchParams.get('lang') || 'fr';
+    return sendJson(res, 200, { languages: languageCatalog(lang) });
+  }
+
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'genres') {
-    return sendJson(res, 200, getGenres());
+    return sendJson(res, 200, getGenres(url.searchParams.get('lang')));
+  }
+
+  // Création d'un genre. Le slug est dérivé de l'intitulé s'il n'est pas fourni,
+  // et c'est lui seul qui sera stocké dans les fiches.
+  if (req.method === 'POST' && parts.length === 2 && parts[1] === 'genres') {
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch (e) {
+      return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+    }
+    const result = genres.createGenre(db, payload);
+    if (result.error) return sendJson(res, 400, { error: result.error });
+    return sendJson(res, 201, result.genre);
+  }
+
+  // Lecture d'un genre isolé, mots-clés compris.
+  if (req.method === 'GET' && parts.length === 3 && parts[1] === 'genres') {
+    const genre = genres.getGenre(db, decodeURIComponent(parts[2]));
+    if (!genre) return sendJson(res, 404, { error: 'not found' });
+    return sendJson(res, 200, genre);
+  }
+
+  // Renommage (libellés), mots-clés, position dans l'ordre d'évaluation.
+  if (req.method === 'PATCH' && parts.length === 3 && parts[1] === 'genres') {
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch (e) {
+      return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+    }
+    const result = genres.updateGenre(db, decodeURIComponent(parts[2]), payload);
+    if (!result) return sendJson(res, 404, { error: 'not found' });
+    if (result.error) return sendJson(res, 400, { error: result.error });
+    return sendJson(res, 200, result.genre);
+  }
+
+  // Suppression, refusée si des fiches y sont encore rangées.
+  if (req.method === 'DELETE' && parts.length === 3 && parts[1] === 'genres') {
+    const result = genres.deleteGenre(db, decodeURIComponent(parts[2]));
+    if (!result) return sendJson(res, 404, { error: 'not found' });
+    if (result.error) return sendJson(res, 409, { error: result.error });
+    res.writeHead(204);
+    return res.end();
   }
 
   if (req.method === 'POST' && parts.length === 3 && parts[1] === 'books' && parts[2] === 'auto-genre') {
@@ -353,7 +866,11 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
     }
-    const result = autoGenre(!!payload.overwrite);
+    const result = autoGenre(!!payload.overwrite, {
+      collections: Array.isArray(payload.collections) && payload.collections.length
+        ? payload.collections.filter((c) => c === 'books' || c === 'documents')
+        : ['books', 'documents'],
+    });
     return sendJson(res, 200, { ok: true, ...result });
   }
 
@@ -547,7 +1064,7 @@ async function handleApi(req, res, url) {
 
     const EDITABLE_FIELDS = [
       'library', 'isbn', 'title', 'publisher', 'publishing_year',
-      'edition', 'notes', 'loaned', 'loaned_to', 'genre',
+      'edition', 'notes', 'loaned', 'loaned_to', 'genre', 'series',
     ];
     const sets = [];
     const params = { id };
@@ -556,9 +1073,29 @@ async function handleApi(req, res, url) {
       let value = payload[field];
       if (field === 'library') value = value ? String(value).trim() || null : null;
       if (field === 'genre') value = value ? String(value).trim() || null : null;
+      if (field === 'series') value = value ? String(value).trim() || null : null;
       if (field === 'loaned') value = value ? 1 : 0;
       sets.push(`${field} = @${field}`);
       params[field] = value;
+    }
+    // La langue n'est pas un champ libre : une valeur hors liste (ou un code
+    // Calibre à trois lettres) est ramenée au code canonique, et refusée en
+    // devenant NULL plutôt qu'en étant stockée telle quelle.
+    if ('language' in payload) {
+      sets.push('language = @language');
+      params.language = normalizeLang(payload.language);
+    }
+    if ('series_index' in payload) {
+      const idx = Number(payload.series_index);
+      sets.push('series_index = @series_index');
+      params.series_index = Number.isFinite(idx) ? idx : null;
+    }
+    if ('tags' in payload) {
+      const tags = Array.isArray(payload.tags)
+        ? payload.tags
+        : String(payload.tags || '').split(',').map((t) => t.trim()).filter(Boolean);
+      sets.push('tags = @tags');
+      params.tags = JSON.stringify(tags);
     }
     if ('authors' in payload) {
       const authors = Array.isArray(payload.authors)
@@ -611,17 +1148,17 @@ async function handleApi(req, res, url) {
       : String(payload.authors || '').split(',').map((s) => s.trim()).filter(Boolean);
 
     const title = String(payload.title).trim();
-    const genre = payload.genre ? String(payload.genre).trim() : guessGenre({ title, authors });
+    const genre = payload.genre ? String(payload.genre).trim() : genres.guessGenre(db, { title, authors });
 
     const stmt = db.prepare(`
       INSERT INTO books
         (library, ident, isbn, title, authors, publisher, publishing_year,
          edition, notes, own, want, redd, loaned, loaned_to, rating, tags, genre,
-         cover, cover_mime)
+         series, series_index, language, cover, cover_mime)
       VALUES
         (@library, NULL, @isbn, @title, @authors, @publisher, @publishing_year,
          @edition, @notes, @own, @want, @redd, @loaned, @loaned_to, @rating, @tags, @genre,
-         @cover, @cover_mime)
+         @series, @series_index, @language, @cover, @cover_mime)
     `);
 
     const info = stmt.run({
@@ -641,6 +1178,9 @@ async function handleApi(req, res, url) {
       rating: Number.isInteger(payload.rating) ? payload.rating : null,
       tags: JSON.stringify(Array.isArray(payload.tags) ? payload.tags : []),
       genre: genre || null,
+      series: payload.series ? String(payload.series).trim() || null : null,
+      series_index: Number.isFinite(Number(payload.series_index)) ? Number(payload.series_index) : null,
+      language: normalizeLang(payload.language),
       cover: coverBuf,
       cover_mime: coverMime,
     });
@@ -657,23 +1197,33 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
     }
-    const ids = Array.isArray(payload.ids) ? payload.ids.map(Number).filter(Number.isInteger) : [];
+    const { books: ids, documents: docIds } = splitUids(payload.ids);
     const library = payload.library ? String(payload.library).trim() : '';
-    if (!ids.length) return sendJson(res, 400, { error: 'No book selected.' });
+    if (!ids.length && !docIds.length) return sendJson(res, 400, { error: 'No book selected.' });
     if (!library) return sendJson(res, 400, { error: 'Destination room missing.' });
 
     const titleStmt = db.prepare('SELECT title FROM books WHERE id = ?');
     const moveStmt = db.prepare('UPDATE books SET library = ? WHERE id = ?');
     const moved = [];
     const failed = [];
+    // Un document du cloud n'a pas de place physique : le déplacer vers une
+    // pièce n'aurait aucun sens, on le signale au lieu de l'ignorer.
+    for (const docId of docIds) {
+      const row = db.prepare('SELECT title FROM documents WHERE id = ?').get(docId);
+      failed.push({
+        id: `d${docId}`,
+        title: row ? row.title : null,
+        error: 'A cloud document has no physical room.',
+      });
+    }
     for (const id of ids) {
       try {
         moveStmt.run(library, id);
-        moved.push(id);
+        moved.push(`b${id}`);
       } catch {
         const row = titleStmt.get(id);
         failed.push({
-          id,
+          id: `b${id}`,
           title: row ? row.title : null,
           error: `Another book in "${library}" already has the same import identifier (duplicate conflict).`,
         });
@@ -690,13 +1240,21 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
     }
-    const ids = Array.isArray(payload.ids) ? payload.ids.map(Number).filter(Number.isInteger) : [];
+    const { books: ids, documents: docIds } = splitUids(payload.ids);
     const genre = payload.genre ? String(payload.genre).trim() || null : null;
-    if (!ids.length) return sendJson(res, 400, { error: 'No book selected.' });
+    if (!ids.length && !docIds.length) return sendJson(res, 400, { error: 'No book selected.' });
 
+    // Le genre est une notion commune aux deux collections : elle s'applique
+    // indifféremment à une fiche papier et à un document.
     const setGenreStmt = db.prepare('UPDATE books SET genre = ? WHERE id = ?');
     for (const id of ids) setGenreStmt.run(genre, id);
-    return sendJson(res, 200, { ok: true, count: ids.length, updated: ids });
+    const setDocGenreStmt = db.prepare("UPDATE documents SET genre = ?, updated_at = datetime('now') WHERE id = ?");
+    for (const id of docIds) setDocGenreStmt.run(genre, id);
+    return sendJson(res, 200, {
+      ok: true,
+      count: ids.length + docIds.length,
+      updated: [...ids.map((i) => `b${i}`), ...docIds.map((i) => `d${i}`)],
+    });
   }
 
   if (req.method === 'DELETE' && parts.length === 3 && parts[1] === 'books') {
