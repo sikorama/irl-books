@@ -117,13 +117,25 @@
   <div class="modal">
     <button class="close-btn" data-close title="Close">×</button>
     <h2>Add a book</h2>
+    <div id="add-image-search" class="image-search-results hidden"></div>
     <form id="add-form">
       <div class="form-grid">
-        <label class="cover-picker">
-          <input type="file" id="cover-input" accept="image/*">
-          <img id="cover-preview" src="/nocover.jpg" alt="Cover">
-          <span title="Choose a cover">🖼️</span>
-        </label>
+        <div class="cover-col">
+          <!-- L'image reste cliquable pour choisir un fichier, comme sur la
+               fiche détaillée ; l'ancienne icône 🖼️ sous la vignette a disparu
+               parce que le bouton 📷 ci-dessous dit la même chose, en clair. -->
+          <label class="cover-picker">
+            <input type="file" id="cover-input" accept="image/*">
+            <img id="cover-preview" src="/nocover.jpg" alt="Cover">
+          </label>
+          <!-- Les mêmes trois actions que sur la fiche détaillée, dans le même
+               ordre : recherche automatique, Google Images, photo de l'appareil. -->
+          <div class="cover-search-actions">
+            <button type="button" id="add-image-search-btn" class="secondary icon-btn" title="Search for a cover automatically">🔍</button>
+            <button type="button" id="add-google-images-btn" class="secondary icon-btn" title="Search Google Images">🌐</button>
+            <button type="button" id="add-cover-file-btn" class="secondary icon-btn" title="Add a photo from this device">📷</button>
+          </div>
+        </div>
         <div class="fields">
           <label class="full">ISBN
             <div class="isbn-row">
