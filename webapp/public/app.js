@@ -97,6 +97,22 @@
     return localStorage.getItem('irl-books:lang') || 'fr';
   }
 
+  // Le catalogue de langues est chargé une fois : c'est une liste fermée, pas un
+  // champ libre, pour que « fr », « fra » et « Français » ne cohabitent pas.
+  let languageCatalog = [];
+
+  async function loadLanguages() {
+    const res = await fetch(`/api/languages?lang=${encodeURIComponent(uiLang())}`);
+    const data = await res.json();
+    languageCatalog = data.languages || [];
+  }
+
+  function languageOptionsHtml(selected) {
+    return ['<option value="">—</option>']
+      .concat(languageCatalog.map((l) => `<option value="${escapeHtml(l.code)}" ${l.code === selected ? 'selected' : ''}>${escapeHtml(l.label)}</option>`))
+      .join('');
+  }
+
   async function loadGenres() {
     const res = await fetch(`/api/genres?lang=${encodeURIComponent(uiLang())}`);
     const data = await res.json();
@@ -255,8 +271,14 @@
     card.dataset.id = entry.uid;
 
     const badges = [];
+    // La pastille de format est un lien direct vers le fichier : c'est le geste
+    // le plus fréquent sur un document, il ne mérite pas de passer par la fiche.
+    // `target="_blank"` laisse le navigateur décider — visionneuse intégrée pour
+    // un PDF, téléchargement pour le reste.
     badges.push(isDoc
-      ? `<span class="badge location cloud">☁️ ${escapeHtml(entry.format || CLOUD_ROOM)}</span>`
+      ? (entry.file_count
+        ? `<a class="badge location cloud" href="/api/documents/${entry.id}/file" target="_blank" rel="noopener" title="Open ${escapeHtml(entry.format || 'file')}">☁️ ${escapeHtml(entry.format || CLOUD_ROOM)}</a>`
+        : `<span class="badge location cloud">☁️ ${escapeHtml(CLOUD_ROOM)}</span>`)
       : `<span class="badge location">${escapeHtml(entry.library || 'Unknown room')}</span>`);
     badges.push(`<span class="badge genre">${escapeHtml(genreLabel(entry.genre) || 'No genre')}</span>`);
     if (entry.loaned) badges.push('<span class="badge loaned">Loaned</span>');
@@ -288,6 +310,9 @@
     });
 
     card.addEventListener('click', (e) => {
+      // Le lien de la pastille fait son travail tout seul : on ne veut pas
+      // ouvrir la fiche par-dessus.
+      if (e.target.closest('a.badge')) { e.stopPropagation(); return; }
       if (!isDoc && e.target.closest('.badge.location')) {
         e.stopPropagation();
         openQuickLibrary(entry);
@@ -537,6 +562,10 @@
           ${fieldRow('Publisher', `<input type="text" class="field-input" data-field="publisher" value="${escapeHtml(book.publisher || '')}">`)}
           ${fieldRow('Year', `<input type="number" class="field-input" data-field="publishing_year" value="${escapeHtml(book.publishing_year || '')}">`)}
           ${fieldRow('Edition', `<input type="text" class="field-input" data-field="edition" value="${escapeHtml(book.edition || '')}">`)}
+          ${fieldRow('Language', `<select class="field-input" data-field="language">${languageOptionsHtml(book.language)}</select>`)}
+          ${fieldRow('Series', `<input type="text" class="field-input" data-field="series" value="${escapeHtml(book.series || '')}">`)}
+          ${fieldRow('No. in series', `<input type="number" step="any" class="field-input" data-field="series_index" value="${escapeHtml(book.series_index ?? '')}">`)}
+          ${fieldRow('Tags, comma-separated', `<input type="text" class="field-input" data-field="tags" value="${escapeHtml((book.tags || []).join(', '))}">`, { full: true })}
           ${fieldRow('ISBN', `
             <div class="isbn-row">
               <input type="text" class="field-input" data-field="isbn" inputmode="numeric" value="${escapeHtml(book.isbn || '')}">
@@ -1179,7 +1208,7 @@
     }
   });
 
-  Promise.all([loadLibraries(), loadGenres()]).then(loadBooks).then(() => {
+  Promise.all([loadLibraries(), loadGenres(), loadLanguages()]).then(loadBooks).then(() => {
     const params = new URLSearchParams(window.location.search);
     const openBookId = params.get('openBook');
     if (openBookId) {

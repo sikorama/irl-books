@@ -13,6 +13,8 @@
 // le disque, à côté des fichiers (Calibre écrit un `cover.jpg` par dossier, 172
 // Ko en moyenne, ~250 Mo pour 1502 documents). Seul leur nom est en base.
 
+const { normalizeLang } = require('./languages.js');
+
 const DOCUMENTS_SCHEMA = `
 CREATE TABLE IF NOT EXISTS documents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +108,28 @@ function ensureDocumentsSchema(db) {
   // Après les ALTER, jamais avant : sur une base où l'import Calibre a déjà
   // tourné, la colonne n'existe pas encore quand le schéma initial est rejoué.
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_text_sig ON documents(text_sig)');
+  normalizeLanguages(db);
+}
+
+// L'import Calibre a écrit les codes de langue à trois lettres de sa propre base
+// (`eng`, `fra`, `slv`). La liste déroulante de l'interface travaille en ISO
+// 639-1 à deux lettres : sans cette normalisation, un document importé
+// afficherait une langue absente de la liste et la perdrait à la première
+// édition. Une valeur non reconnue est mise à NULL plutôt que conservée telle
+// quelle — un champ vide se voit dans les filtres, une langue fausse non.
+function normalizeLanguages(db) {
+  const rows = db.prepare(`
+    SELECT DISTINCT language FROM documents WHERE language IS NOT NULL AND length(language) <> 2
+  `).all();
+  if (!rows.length) return 0;
+  const stmt = db.prepare('UPDATE documents SET language = ? WHERE language = ?');
+  let changed = 0;
+  for (const row of rows) {
+    const canonical = normalizeLang(row.language);
+    stmt.run(canonical, row.language);
+    changed++;
+  }
+  return changed;
 }
 
 // Ordre de préférence du format « principal » — celui qu'on ouvre, qu'on indexe

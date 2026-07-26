@@ -8,6 +8,7 @@ const path = require('path');
 const { openDb, DB_PATH, LIBRARY_ROOT } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
 const genres = require('./lib/genres.js');
+const { normalizeLang, languageCatalog } = require('./lib/languages.js');
 const { lookupIsbn, imageSearchStream, hasGoogleBooksKey, describeGoogleBooksKey } = require('./lib/lookup.js');
 const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
 const documents = require('./lib/documents.js');
@@ -96,6 +97,9 @@ function rowToBook(row) {
     rating: row.rating,
     tags: JSON.parse(row.tags || '[]'),
     genre: row.genre,
+    series: row.series,
+    series_index: row.series_index,
+    language: row.language,
     has_cover: row.cover !== null,
     cover_rev: row.cover_rev || 0,
     created_at: row.created_at,
@@ -105,7 +109,7 @@ function rowToBook(row) {
 const BOOK_COLUMNS = `
   id, library, ident, isbn, title, authors, publisher, publishing_year,
   edition, notes, own, want, redd, loaned, loaned_to, rating, tags, genre,
-  cover, cover_rev, created_at
+  series, series_index, language, cover, cover_rev, created_at
 `;
 
 function listBooks(query) {
@@ -113,7 +117,7 @@ function listBooks(query) {
   const params = {};
 
   if (query.q) {
-    clauses.push('(title LIKE @q OR authors LIKE @q OR publisher LIKE @q OR isbn LIKE @q)');
+    clauses.push('(title LIKE @q OR authors LIKE @q OR publisher LIKE @q OR isbn LIKE @q OR series LIKE @q OR tags LIKE @q)');
     params.q = `%${query.q}%`;
   }
   if (query.library) {
@@ -634,6 +638,11 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, getLibraries());
   }
 
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'languages') {
+    const lang = url.searchParams.get('lang') || 'fr';
+    return sendJson(res, 200, { languages: languageCatalog(lang) });
+  }
+
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'genres') {
     return sendJson(res, 200, getGenres(url.searchParams.get('lang')));
   }
@@ -888,7 +897,7 @@ async function handleApi(req, res, url) {
 
     const EDITABLE_FIELDS = [
       'library', 'isbn', 'title', 'publisher', 'publishing_year',
-      'edition', 'notes', 'loaned', 'loaned_to', 'genre',
+      'edition', 'notes', 'loaned', 'loaned_to', 'genre', 'series',
     ];
     const sets = [];
     const params = { id };
@@ -897,9 +906,29 @@ async function handleApi(req, res, url) {
       let value = payload[field];
       if (field === 'library') value = value ? String(value).trim() || null : null;
       if (field === 'genre') value = value ? String(value).trim() || null : null;
+      if (field === 'series') value = value ? String(value).trim() || null : null;
       if (field === 'loaned') value = value ? 1 : 0;
       sets.push(`${field} = @${field}`);
       params[field] = value;
+    }
+    // La langue n'est pas un champ libre : une valeur hors liste (ou un code
+    // Calibre à trois lettres) est ramenée au code canonique, et refusée en
+    // devenant NULL plutôt qu'en étant stockée telle quelle.
+    if ('language' in payload) {
+      sets.push('language = @language');
+      params.language = normalizeLang(payload.language);
+    }
+    if ('series_index' in payload) {
+      const idx = Number(payload.series_index);
+      sets.push('series_index = @series_index');
+      params.series_index = Number.isFinite(idx) ? idx : null;
+    }
+    if ('tags' in payload) {
+      const tags = Array.isArray(payload.tags)
+        ? payload.tags
+        : String(payload.tags || '').split(',').map((t) => t.trim()).filter(Boolean);
+      sets.push('tags = @tags');
+      params.tags = JSON.stringify(tags);
     }
     if ('authors' in payload) {
       const authors = Array.isArray(payload.authors)
@@ -958,11 +987,11 @@ async function handleApi(req, res, url) {
       INSERT INTO books
         (library, ident, isbn, title, authors, publisher, publishing_year,
          edition, notes, own, want, redd, loaned, loaned_to, rating, tags, genre,
-         cover, cover_mime)
+         series, series_index, language, cover, cover_mime)
       VALUES
         (@library, NULL, @isbn, @title, @authors, @publisher, @publishing_year,
          @edition, @notes, @own, @want, @redd, @loaned, @loaned_to, @rating, @tags, @genre,
-         @cover, @cover_mime)
+         @series, @series_index, @language, @cover, @cover_mime)
     `);
 
     const info = stmt.run({
@@ -982,6 +1011,9 @@ async function handleApi(req, res, url) {
       rating: Number.isInteger(payload.rating) ? payload.rating : null,
       tags: JSON.stringify(Array.isArray(payload.tags) ? payload.tags : []),
       genre: genre || null,
+      series: payload.series ? String(payload.series).trim() || null : null,
+      series_index: Number.isFinite(Number(payload.series_index)) ? Number(payload.series_index) : null,
+      language: normalizeLang(payload.language),
       cover: coverBuf,
       cover_mime: coverMime,
     });

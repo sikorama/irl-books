@@ -177,7 +177,14 @@
     card.dataset.id = doc.id;
 
     const badges = [];
-    if (doc.format) badges.push(`<span class="badge location">${escapeHtml(doc.format)}</span>`);
+    // Lien direct vers le fichier : le geste le plus fréquent sur un document ne
+    // passe pas par la fiche. Le navigateur choisit d'ouvrir ou de télécharger
+    // selon le format.
+    if (doc.format) {
+      badges.push(doc.file_count
+        ? `<a class="badge location" href="/api/documents/${doc.id}/file" target="_blank" rel="noopener" title="Open ${escapeHtml(doc.format)}">${escapeHtml(doc.format)}</a>`
+        : `<span class="badge location">${escapeHtml(doc.format)}</span>`);
+    }
     badges.push(`<span class="badge genre">${escapeHtml(genreLabel(doc.genre) || 'No genre')}</span>`);
     if (doc.missing_count) badges.push('<span class="badge loaned">Missing</span>');
     else if (!doc.file_count) badges.push('<span class="badge loaned">No file</span>');
@@ -206,6 +213,7 @@
     });
 
     card.addEventListener('click', (e) => {
+      if (e.target.closest('a.badge')) { e.stopPropagation(); return; }
       if (e.target.closest('.badge.genre')) {
         e.stopPropagation();
         openQuickGenre(doc);

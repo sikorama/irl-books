@@ -38,10 +38,29 @@ window.DocDetail = (() => {
     return items || '<li class="doc-file missing"><em>no file</em></li>';
   }
 
+  // Liste fermée, chargée une seule fois et mémorisée : la langue n'est pas un
+  // champ libre, sinon « fr », « fra » et « Français » finiraient par coexister.
+  let languages = null;
+
+  async function loadLanguages(uiLang) {
+    if (languages) return languages;
+    const res = await fetch(`/api/languages?lang=${encodeURIComponent(uiLang || 'fr')}`);
+    const data = await res.json().catch(() => ({}));
+    languages = data.languages || [];
+    return languages;
+  }
+
+  function languageOptionsHtml(selected) {
+    return ['<option value="">—</option>']
+      .concat((languages || []).map((l) => `<option value="${escapeHtml(l.code)}" ${l.code === selected ? 'selected' : ''}>${escapeHtml(l.label)}</option>`))
+      .join('');
+  }
+
   // `genreOptionsHtml` et `onSaved` sont fournis par la page appelante : chacune
   // a son propre catalogue de genres déjà chargé et sa propre grille à
   // rafraîchir après une écriture.
   async function open({ id, container, overlay, genreOptionsHtml, onSaved }) {
+    await loadLanguages(localStorage.getItem('irl-books:lang') || 'fr');
     const res = await fetch(`/api/documents/${id}`);
     if (!res.ok) return;
     const doc = await res.json();
@@ -62,7 +81,7 @@ window.DocDetail = (() => {
           ${fieldRow('Genre', `<select class="field-input" data-field="genre">${genreOptionsHtml(doc.genre)}</select>`)}
           ${fieldRow('Year', `<input type="number" class="field-input" data-field="pub_year" value="${escapeHtml(doc.pub_year || '')}">`)}
           ${fieldRow('Publisher', `<input type="text" class="field-input" data-field="publisher" value="${escapeHtml(doc.publisher || '')}">`)}
-          ${fieldRow('Language', `<input type="text" class="field-input" data-field="language" value="${escapeHtml(doc.language || '')}">`)}
+          ${fieldRow('Language', `<select class="field-input" data-field="language">${languageOptionsHtml(doc.language)}</select>`)}
           ${fieldRow('Series', `<input type="text" class="field-input" data-field="series" value="${escapeHtml(doc.series || '')}">`)}
           ${fieldRow('No. in series', `<input type="number" step="any" class="field-input" data-field="series_index" value="${escapeHtml(doc.series_index ?? '')}">`)}
           ${fieldRow('DOI', `<input type="text" class="field-input" data-field="doi" value="${escapeHtml(doc.doi || '')}">`)}

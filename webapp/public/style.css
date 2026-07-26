@@ -832,3 +832,15 @@ form .form-grid { display: flex; gap: 1.2rem; flex-wrap: wrap; }
 .genre-row-actions button { font-size: 0.78rem; padding: 0.25rem 0.6rem; }
 .genre-row-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 .genre-row-note { font-size: 0.72rem; color: var(--text-dim); }
+
+/* La pastille de format est un lien : elle doit se comporter comme tel au
+   survol, sans hériter du soulignement par défaut des liens. Le sélecteur porte
+   les trois classes parce que la règle « cursor: default » de la pastille cloud
+   non cliquable est plus spécifique qu'un simple `a.badge.location`. */
+a.badge.location,
+a.badge.location.cloud {
+  text-decoration: none;
+  cursor: pointer;
+}
+a.badge.location:hover,
+a.badge.location.cloud:hover { filter: brightness(1.25); }

@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const fts = require('./docs-fts.js');
+const { normalizeLang } = require('./languages.js');
 
 const DOCUMENT_COLUMNS = `
   id, calibre_id, dir, cover_name, title, authors, series, series_index,
@@ -245,7 +246,7 @@ function getFacets(db) {
 }
 
 const EDITABLE_FIELDS = [
-  'title', 'series', 'publisher', 'language', 'isbn', 'doi', 'genre', 'notes',
+  'title', 'series', 'publisher', 'isbn', 'doi', 'genre', 'notes',
 ];
 
 function updateDocument(db, id, payload) {
@@ -273,6 +274,11 @@ function updateDocument(db, id, payload) {
       : String(payload.tags || '').split(',').map((s) => s.trim()).filter(Boolean);
     sets.push('tags = @tags');
     params.tags = JSON.stringify(tags);
+  }
+  // Champ contraint, pas libre : voir lib/languages.js.
+  if ('language' in payload) {
+    sets.push('language = @language');
+    params.language = normalizeLang(payload.language);
   }
   if ('pub_year' in payload) {
     const year = Number(payload.pub_year);

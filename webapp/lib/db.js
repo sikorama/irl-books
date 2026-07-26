@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS books (
   cover BLOB,
   cover_mime TEXT,
   cover_rev INTEGER NOT NULL DEFAULT 0,
+  series TEXT,
+  series_index REAL,
+  language TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_books_library ON books(library);
@@ -59,6 +62,13 @@ function migrate(db) {
     db.exec('ALTER TABLE books ADD COLUMN cover_rev INTEGER NOT NULL DEFAULT 0');
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_books_genre ON books(genre)');
+
+  // Série, numéro dans la série et langue : ces notions valent autant pour un
+  // livre papier que pour un document, donc les deux tables les portent.
+  for (const [name, decl] of [['series', 'TEXT'], ['series_index', 'REAL'], ['language', 'TEXT']]) {
+    if (!columns.includes(name)) db.exec(`ALTER TABLE books ADD COLUMN ${name} ${decl}`);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_books_series ON books(series)');
 }
 
 function openDb() {

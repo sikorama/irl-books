@@ -108,27 +108,6 @@ const SEED_GENRES = [
     },
   },
   {
-    value: 'romans-nouvelles',
-    labels: { fr: 'Romans et nouvelles', en: 'Novels & Short Stories' },
-    // Même problème de forme contre sujet que « Manuels et documentation », en
-    // pire : les mots évidents sont des pièges. « roman » attrape « art roman »
-    // et « roman de Renard » ; « fiction » attrape « science fiction » ; et
-    // surtout « novel » est omniprésent dans les titres de publications
-    // scientifiques (« a novel algorithm for… »), ce qui pollue massivement un
-    // corpus de 1501 articles. Seules les formulations sans équivoque restent.
-    keywords: {
-      fr: [
-        'nouvelles choisies', 'recueil de nouvelles', 'nouvelles completes',
-        'novella', 'roman policier', 'premier roman',
-      ],
-      en: [
-        'short stories', 'short story', 'novella', 'collected stories',
-        'complete stories', 'selected stories',
-      ],
-      '*': [],
-    },
-  },
-  {
     value: 'musique',
     labels: { fr: 'Musique', en: 'Music' },
     keywords: {
@@ -439,6 +418,29 @@ const SEED_GENRES = [
         'quantum', 'semiconductor', 'datasheet', 'circuit', 'circuits',
       ],
       '*': ['robot', 'robots', 'internet', 'z80', 'fpga', 'vhdl', 'basic', 'unix', 'opengl'],
+    },
+  },
+  {
+    value: 'romans-nouvelles',
+    labels: { fr: 'Romans et nouvelles', en: 'Novels & Short Stories' },
+    // Dernier de la liste, et c'est ce qui rend ses mots-clés utilisables. Placé
+    // plus haut, « roman » attrapait « art roman » et « gallo romain », et
+    // « novel » attrapait tous les « a novel algorithm for… » d'un corpus
+    // d'articles scientifiques. En fourre-tout de fin de liste, il ne se
+    // déclenche que si aucun genre plus spécifique n'a reconnu le titre — donc
+    // « Roman classique » garde ses classiques, et les romans quelconques
+    // tombent ici.
+    keywords: {
+      fr: [
+        'roman', 'romans', 'nouvelle', 'nouvelles', 'recit', 'recits', 'novella',
+        'recueil de nouvelles', 'nouvelles choisies', 'fiction', 'saga',
+      ],
+      en: [
+        'novel', 'novels', 'novella', 'short stories', 'short story',
+        'collected stories', 'complete stories', 'selected stories', 'fiction',
+        'saga', 'tales',
+      ],
+      '*': [],
     },
   },
 ];
