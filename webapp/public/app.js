@@ -91,8 +91,14 @@
     return opts.join('');
   }
 
+  // La langue n'affecte que les intitulés : les `value` renvoyés sont les mêmes
+  // et ce sont eux qui sont stockés dans les fiches.
+  function uiLang() {
+    return localStorage.getItem('irl-books:lang') || 'fr';
+  }
+
   async function loadGenres() {
-    const res = await fetch('/api/genres');
+    const res = await fetch(`/api/genres?lang=${encodeURIComponent(uiLang())}`);
     const data = await res.json();
     genreCatalog = data.genres;
 

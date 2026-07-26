@@ -102,8 +102,12 @@
     return params.toString();
   }
 
+  function uiLang() {
+    return localStorage.getItem('irl-books:lang') || 'fr';
+  }
+
   async function loadGenres() {
-    const res = await fetch('/api/genres');
+    const res = await fetch(`/api/genres?lang=${encodeURIComponent(uiLang())}`);
     const data = await res.json();
     genreCatalog = data.genres;
 

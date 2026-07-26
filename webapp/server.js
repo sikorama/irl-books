@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { openDb, DB_PATH, LIBRARY_ROOT } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
-const { GENRES, guessGenre } = require('./lib/categorize.js');
+const genres = require('./lib/genres.js');
 const { lookupIsbn, imageSearchStream, hasGoogleBooksKey, describeGoogleBooksKey } = require('./lib/lookup.js');
 const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
 const documents = require('./lib/documents.js');
@@ -207,30 +207,43 @@ function getLibraries() {
   return rooms;
 }
 
-// Les compteurs de genre couvrent tout le catalogue : une seule pièce de plus ne
-// doit pas donner deux totaux différents selon la page qu'on regarde.
-function getGenres() {
-  const counts = new Map();
-  const add = (genre, n) => counts.set(genre, (counts.get(genre) || 0) + n);
-  for (const r of db.prepare('SELECT genre, COUNT(*) c FROM books GROUP BY genre').all()) add(r.genre, r.c);
-  for (const r of db.prepare('SELECT genre, COUNT(*) c FROM documents GROUP BY genre').all()) add(r.genre, r.c);
-  const catalog = GENRES.map((g) => ({ ...g, count: counts.get(g.value) || 0 }));
-  const noGenreCount = counts.get(null) || 0;
-  return { genres: catalog, no_genre_count: noGenreCount };
+// Les compteurs couvrent tout le catalogue, papier et cloud : une seule pièce de
+// plus ne doit pas donner deux totaux différents selon la page qu'on regarde. La
+// langue ne sert qu'à résoudre l'intitulé affiché — les compteurs, eux, portent
+// sur le slug, donc ils ne bougent pas d'une langue à l'autre.
+function getGenres(lang) {
+  return genres.catalogFor(db, lang);
 }
 
-function autoGenre(overwrite) {
-  const rows = db.prepare('SELECT id, title, authors, genre FROM books').all();
-  const stmt = db.prepare('UPDATE books SET genre = ? WHERE id = ?');
-  let updated = 0;
-  for (const row of rows) {
-    if (row.genre && !overwrite) continue;
-    const guessed = guessGenre({ title: row.title, authors: JSON.parse(row.authors || '[]') });
-    if (!guessed || guessed === row.genre) continue;
-    stmt.run(guessed, row.id);
-    updated++;
+// La classification automatique tourne sur les deux collections : les mots-clés
+// anglais ajoutés au catalogue n'auraient sinon aucun effet sur les 826
+// documents anglophones du cloud.
+//
+// Les règles sont compilées une fois pour toute la passe, pas une fois par
+// fiche : sur 2789 entrées la différence est franche.
+function autoGenre(overwrite, { collections = ['books', 'documents'] } = {}) {
+  const rules = genres.compiledRules(db);
+  const { matchGenre } = require('./lib/categorize.js');
+  const result = { updated: 0, total: 0, by_collection: {} };
+
+  for (const table of collections) {
+    const rows = db.prepare(`SELECT id, title, authors, genre FROM ${table}`).all();
+    const stmt = db.prepare(`UPDATE ${table} SET genre = ? WHERE id = ?`);
+    let updated = 0;
+    for (const row of rows) {
+      if (row.genre && !overwrite) continue;
+      let authors = [];
+      try { authors = JSON.parse(row.authors || '[]'); } catch { authors = []; }
+      const guessed = matchGenre(rules, { title: row.title, authors });
+      if (!guessed || guessed === row.genre) continue;
+      stmt.run(guessed, row.id);
+      updated++;
+    }
+    result.by_collection[table] = { updated, total: rows.length };
+    result.updated += updated;
+    result.total += rows.length;
   }
-  return { updated, total: rows.length };
+  return result;
 }
 
 function getDuplicates() {
@@ -622,7 +635,51 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'genres') {
-    return sendJson(res, 200, getGenres());
+    return sendJson(res, 200, getGenres(url.searchParams.get('lang')));
+  }
+
+  // Création d'un genre. Le slug est dérivé de l'intitulé s'il n'est pas fourni,
+  // et c'est lui seul qui sera stocké dans les fiches.
+  if (req.method === 'POST' && parts.length === 2 && parts[1] === 'genres') {
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch (e) {
+      return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+    }
+    const result = genres.createGenre(db, payload);
+    if (result.error) return sendJson(res, 400, { error: result.error });
+    return sendJson(res, 201, result.genre);
+  }
+
+  // Lecture d'un genre isolé, mots-clés compris.
+  if (req.method === 'GET' && parts.length === 3 && parts[1] === 'genres') {
+    const genre = genres.getGenre(db, decodeURIComponent(parts[2]));
+    if (!genre) return sendJson(res, 404, { error: 'not found' });
+    return sendJson(res, 200, genre);
+  }
+
+  // Renommage (libellés), mots-clés, position dans l'ordre d'évaluation.
+  if (req.method === 'PATCH' && parts.length === 3 && parts[1] === 'genres') {
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch (e) {
+      return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+    }
+    const result = genres.updateGenre(db, decodeURIComponent(parts[2]), payload);
+    if (!result) return sendJson(res, 404, { error: 'not found' });
+    if (result.error) return sendJson(res, 400, { error: result.error });
+    return sendJson(res, 200, result.genre);
+  }
+
+  // Suppression, refusée si des fiches y sont encore rangées.
+  if (req.method === 'DELETE' && parts.length === 3 && parts[1] === 'genres') {
+    const result = genres.deleteGenre(db, decodeURIComponent(parts[2]));
+    if (!result) return sendJson(res, 404, { error: 'not found' });
+    if (result.error) return sendJson(res, 409, { error: result.error });
+    res.writeHead(204);
+    return res.end();
   }
 
   if (req.method === 'POST' && parts.length === 3 && parts[1] === 'books' && parts[2] === 'auto-genre') {
@@ -633,7 +690,11 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
     }
-    const result = autoGenre(!!payload.overwrite);
+    const result = autoGenre(!!payload.overwrite, {
+      collections: Array.isArray(payload.collections) && payload.collections.length
+        ? payload.collections.filter((c) => c === 'books' || c === 'documents')
+        : ['books', 'documents'],
+    });
     return sendJson(res, 200, { ok: true, ...result });
   }
 
@@ -891,7 +952,7 @@ async function handleApi(req, res, url) {
       : String(payload.authors || '').split(',').map((s) => s.trim()).filter(Boolean);
 
     const title = String(payload.title).trim();
-    const genre = payload.genre ? String(payload.genre).trim() : guessGenre({ title, authors });
+    const genre = payload.genre ? String(payload.genre).trim() : genres.guessGenre(db, { title, authors });
 
     const stmt = db.prepare(`
       INSERT INTO books

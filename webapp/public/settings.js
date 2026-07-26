@@ -100,28 +100,160 @@
     }
   }
 
-  async function loadGenres() {
-    const res = await fetch('/api/genres');
-    const data = await res.json();
-    genresList.innerHTML = '';
-    const sorted = [...data.genres].sort((a, b) => b.count - a.count);
-    for (const g of sorted) {
-      const row = document.createElement('div');
-      row.className = 'library-row';
-      row.innerHTML = `
+  // --- Éditeur de genres ----------------------------------------------------
+  //
+  // Toute l'interface ne manipule que le `value` d'un genre. Les intitulés et les
+  // mots-clés sont des données éditables ; changer la langue d'affichage ne
+  // touche donc jamais à la classification, c'est le point de tout ce système.
+
+  const LANG_KEY = 'irl-books:lang';
+  let uiLang = localStorage.getItem(LANG_KEY) || 'fr';
+  let genreCatalog = { genres: [], langs: ['fr', 'en'], no_genre_count: 0 };
+
+  const langSelect = document.getElementById('lang-select');
+  const addGenreBtn = document.getElementById('add-genre-btn');
+  const genreEditStatus = document.getElementById('genre-edit-status');
+
+  function labelOf(g) {
+    return g.labels[uiLang] || g.labels.fr || g.labels.en || g.value;
+  }
+
+  function keywordsFor(g, lang) {
+    return (g.keywords[lang] || []).join(', ');
+  }
+
+  async function saveGenre(value, patch) {
+    genreEditStatus.textContent = 'Saving…';
+    const res = await fetch(`/api/genres/${encodeURIComponent(value)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Not saved (HTTP ${res.status})`);
+    genreEditStatus.textContent = 'Saved ✓';
+    return data;
+  }
+
+  function parseKeywordList(raw) {
+    return String(raw || '')
+      .split(/[,\n]/)
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  function renderGenreRow(g) {
+    const row = document.createElement('details');
+    row.className = 'genre-row';
+    const langs = genreCatalog.langs;
+    // `*` est proposé comme une langue de plus, parce que c'est exactement son
+    // rôle du point de vue de l'édition : une liste de mots-clés parmi d'autres.
+    const keywordLangs = [...langs, '*'];
+
+    row.innerHTML = `
+      <summary>
         <span class="library-count">${g.count}</span>
-        <span>${escapeHtml(g.label)}</span>
-      `;
-      genresList.appendChild(row);
-    }
+        <span class="genre-name">${escapeHtml(labelOf(g))}</span>
+        <code class="genre-slug">${escapeHtml(g.value)}</code>
+      </summary>
+      <div class="genre-body">
+        <div class="genre-labels">
+          ${langs.map((l) => `
+            <label>Label (${escapeHtml(l)})
+              <input type="text" data-label-lang="${escapeHtml(l)}" value="${escapeHtml(g.labels[l] || '')}">
+            </label>`).join('')}
+        </div>
+        ${keywordLangs.map((l) => `
+          <label class="genre-keywords">Keywords (${escapeHtml(l)}) — comma-separated
+            <textarea rows="2" data-kw-lang="${escapeHtml(l)}">${escapeHtml(keywordsFor(g, l))}</textarea>
+          </label>`).join('')}
+        <div class="genre-row-actions">
+          <button type="button" class="secondary genre-save">Save</button>
+          <button type="button" class="secondary genre-delete"${g.count ? ' disabled title="Move its items to another genre first"' : ''}>Delete</button>
+          <span class="genre-row-note">${g.count ? `${g.count} item(s) use this genre` : 'unused — can be deleted'}</span>
+        </div>
+      </div>
+    `;
+
+    row.querySelector('.genre-save').addEventListener('click', async () => {
+      const labels = {};
+      row.querySelectorAll('[data-label-lang]').forEach((i) => { labels[i.dataset.labelLang] = i.value; });
+      const keywords = {};
+      row.querySelectorAll('[data-kw-lang]').forEach((t) => { keywords[t.dataset.kwLang] = parseKeywordList(t.value); });
+      try {
+        await saveGenre(g.value, { labels, keywords });
+        await loadGenres();
+      } catch (e) {
+        genreEditStatus.textContent = e.message;
+      }
+    });
+
+    row.querySelector('.genre-delete').addEventListener('click', async () => {
+      if (!confirm(`Delete the genre "${labelOf(g)}"? Its keywords are lost.`)) return;
+      genreEditStatus.textContent = 'Deleting…';
+      const res = await fetch(`/api/genres/${encodeURIComponent(g.value)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        genreEditStatus.textContent = data.error || `Not deleted (HTTP ${res.status})`;
+        return;
+      }
+      genreEditStatus.textContent = 'Deleted ✓';
+      await loadGenres();
+    });
+
+    return row;
+  }
+
+  async function loadGenres() {
+    const res = await fetch(`/api/genres?lang=${encodeURIComponent(uiLang)}`);
+    genreCatalog = await res.json();
+
+    const current = langSelect.value;
+    langSelect.innerHTML = genreCatalog.langs
+      .map((l) => `<option value="${escapeHtml(l)}">${escapeHtml(l)}</option>`).join('');
+    langSelect.value = current || uiLang;
+
+    genresList.innerHTML = '';
+    // Dans l'ordre d'évaluation, pas par nombre de fiches : c'est cet ordre qui
+    // décide quel genre gagne, donc c'est celui qu'il faut voir pour comprendre.
+    for (const g of genreCatalog.genres) genresList.appendChild(renderGenreRow(g));
+
     const noGenreRow = document.createElement('div');
-    noGenreRow.className = 'library-row';
+    noGenreRow.className = 'genre-row genre-row-static';
     noGenreRow.innerHTML = `
-      <span class="library-count">${data.no_genre_count}</span>
-      <span>No genre</span>
+      <span class="library-count">${genreCatalog.no_genre_count}</span>
+      <span class="genre-name">No genre</span>
     `;
     genresList.appendChild(noGenreRow);
   }
+
+  langSelect.addEventListener('change', async () => {
+    uiLang = langSelect.value;
+    localStorage.setItem(LANG_KEY, uiLang);
+    await loadGenres();
+  });
+
+  addGenreBtn.addEventListener('click', async () => {
+    const fr = prompt('French label for the new genre?');
+    if (!fr || !fr.trim()) return;
+    const en = prompt('English label? (optional)') || '';
+    genreEditStatus.textContent = 'Creating…';
+    try {
+      const res = await fetch('/api/genres', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labels: { fr: fr.trim(), en: en.trim() }, keywords: {} }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Not created (HTTP ${res.status})`);
+      // Créé en fin de liste, donc évalué en dernier : ses mots-clés ne peuvent
+      // pas détourner une classification existante sans intention explicite.
+      genreEditStatus.textContent = `Created "${data.value}" — added at the end of the evaluation order.`;
+      await loadGenres();
+    } catch (e) {
+      genreEditStatus.textContent = e.message;
+    }
+  });
 
   autoGenreBtn.addEventListener('click', async () => {
     const overwrite = genreOverwriteCheckbox.checked;
@@ -137,7 +269,10 @@
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Categorization failed.');
-      autoGenreStatus.textContent = `${data.updated} book${data.updated !== 1 ? 's' : ''} categorized out of ${data.total}.`;
+      const per = Object.entries(data.by_collection || {})
+        .map(([k, v]) => `${v.updated}/${v.total} ${k === 'books' ? 'books' : 'documents'}`)
+        .join(' · ');
+      autoGenreStatus.textContent = `${data.updated} item(s) categorized out of ${data.total}${per ? ` (${per})` : ''}.`;
       await loadGenres();
     } catch (e) {
       autoGenreStatus.textContent = `Error: ${e.message}`;

@@ -32,11 +32,26 @@
   </section>
 
   <section class="settings-section">
+    <h2>Display language</h2>
+    <p class="section-intro">Only changes the labels shown for genres. A genre is identified by a stable internal key, so switching language never moves a book or a document from one genre to another. Remembered per device.</p>
+    <select id="lang-select"></select>
+  </section>
+
+  <section class="settings-section">
     <h2>Genres</h2>
-    <p class="section-intro">Automatic categorization by keyword on title and author (gardening, esotericism, art, novels, comics…). Books already categorized are left untouched unless you check the box below.</p>
-    <div id="genres-list" class="libraries-list"></div>
+    <p class="section-intro">A genre has one label per language and one keyword list per language — but classification always matches against <em>every</em> keyword of <em>every</em> language, which is what makes it language-independent. Use the <code>*</code> list for anything that belongs to no language: author names, series, formats. Order matters: the first genre whose keyword is found wins, so specific genres must come before generic ones.</p>
+    <div id="genres-list" class="genre-editor"></div>
+    <div class="button-row">
+      <button id="add-genre-btn" class="secondary">+ New genre</button>
+    </div>
+    <p id="genre-edit-status" class="export-status"></p>
+  </section>
+
+  <section class="settings-section">
+    <h2>Auto-categorize</h2>
+    <p class="section-intro">Applies the keyword rules above to titles and authors. Runs on both collections — physical books and cloud documents. Items already categorized are left untouched unless you check the box.</p>
     <div class="checkbox-row genre-overwrite-row">
-      <label><input type="checkbox" id="genre-overwrite-checkbox"> Also recategorize books that already have a genre</label>
+      <label><input type="checkbox" id="genre-overwrite-checkbox"> Also recategorize items that already have a genre</label>
     </div>
     <button id="auto-genre-btn" class="primary icon-btn" title="Auto-categorize">🏷️</button>
     <p id="auto-genre-status" class="export-status"></p>

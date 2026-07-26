@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseBookYaml } = require('./lib/yaml-lite.js');
 const { openDb } = require('./lib/db.js');
-const { guessGenre } = require('./lib/categorize.js');
+const { guessGenre } = require('./lib/genres.js');
 
 const SKIP_DIRS = new Set(['covers']);
 
@@ -87,7 +87,7 @@ function main() {
           loaned_to: book.loaned_to || null,
           rating: typeof book.rating === 'number' ? book.rating : null,
           tags: JSON.stringify(book.tags || []),
-          genre: guessGenre({ title, authors }),
+          genre: guessGenre(db, { title, authors }),
           cover: cover.data,
           cover_mime: cover.mime,
         });

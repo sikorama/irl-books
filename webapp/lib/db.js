@@ -3,6 +3,7 @@
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { ensureDocumentsSchema } = require('./docs-db.js');
+const { ensureGenresSchema } = require('./genres.js');
 
 const DB_PATH = process.env.LIBRARY_DB
   ? path.resolve(process.env.LIBRARY_DB)
@@ -65,6 +66,9 @@ function openDb() {
   db.exec(SCHEMA);
   migrate(db);
   ensureDocumentsSchema(db);
+  // Après le schéma des documents : le semis des genres compte leur usage sur
+  // les deux collections, donc la table `documents` doit exister.
+  ensureGenresSchema(db);
   return db;
 }
 
