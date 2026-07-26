@@ -135,22 +135,45 @@ function isbnVariants(clean) {
 // trouvée sur le web peut peser plusieurs Mo, et elle finit stockée en base.
 const MAX_COVER_BYTES = 5 * 1024 * 1024;
 
-async function fetchCoverImage(url) {
+// Pourquoi une couverture ne revient pas est une information à part entière :
+// un 404 dit « ce catalogue ne l'a pas », une exception dit « le réseau est
+// tombé ». Les confondre fait passer une panne pour une absence — un script de
+// rattrapage annonçait ainsi « 0 trouvée » sur 290 livres sans qu'on puisse
+// savoir s'il avait travaillé ou s'il n'avait jamais atteint le serveur.
+//
+// `reason` est destiné à un humain qui lit un journal ; `failed` distingue la
+// panne (réseau, délai dépassé) du refus (absente, format inattendu).
+async function fetchCoverImageDetailed(url) {
   try {
     const res = await httpGet(url, { timeout: COVER_TIMEOUT_MS, accept: 'image/*' });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      return { image: null, status: res.status, reason: `HTTP ${res.status}`, failed: res.status >= 500 };
+    }
     const declared = Number(res.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > MAX_COVER_BYTES) return null;
+    if (Number.isFinite(declared) && declared > MAX_COVER_BYTES) {
+      return { image: null, status: res.status, reason: `annoncée à ${declared} octets, au-delà de la limite`, failed: false };
+    }
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 100 || buf.length > MAX_COVER_BYTES) return null;
+    if (buf.length < 100 || buf.length > MAX_COVER_BYTES) {
+      return { image: null, status: res.status, reason: `taille inutilisable (${buf.length} octets)`, failed: false };
+    }
     const mime = sniffImageMime(buf);
-    if (!mime) return null; // page d'erreur HTML ou format inconnu
+    if (!mime) {
+      // page d'erreur HTML ou format inconnu
+      return { image: null, status: res.status, reason: 'pas une image', failed: false };
+    }
     const size = imageSize(buf);
-    if (!looksLikeCover(size)) return null;
-    return { buf, mime, width: size.width, height: size.height };
-  } catch {
-    return null;
+    if (!looksLikeCover(size)) {
+      return { image: null, status: res.status, reason: `proportions hors couverture (${size.width}×${size.height})`, failed: false };
+    }
+    return { image: { buf, mime, width: size.width, height: size.height }, status: res.status, reason: null, failed: false };
+  } catch (e) {
+    return { image: null, status: 0, reason: describeError(e), failed: true };
   }
+}
+
+async function fetchCoverImage(url) {
+  return (await fetchCoverImageDetailed(url)).image;
 }
 
 async function fetchCoverBase64(url) {
@@ -522,6 +545,7 @@ module.exports = {
   lookupIsbn,
   imageSearchStream,
   fetchCoverImage,
+  fetchCoverImageDetailed,
   googleBooksCover,
   openLibraryCoverUrl,
   cleanIsbn,
