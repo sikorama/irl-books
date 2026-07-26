@@ -112,7 +112,11 @@ const BOOK_COLUMNS = `
   series, series_index, language, cover, cover_rev, created_at
 `;
 
-function listBooks(query) {
+// Extrait de `listBooks` pour que les statistiques portent sur exactement la même
+// sélection que la grille : un seul endroit décide ce que « les titres filtrés »
+// veut dire, donc le total affiché en haut de la page de stats est par
+// construction le nombre de vignettes de la bibliothèque.
+function bookFilter(query) {
   const clauses = [];
   const params = {};
 
@@ -143,10 +147,47 @@ function listBooks(query) {
     clauses.push("(isbn IS NULL OR isbn = '')");
   }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+function listBooks(query) {
+  const { where, params } = bookFilter(query);
   const sql = `SELECT ${BOOK_COLUMNS} FROM books ${where} ORDER BY title COLLATE NOCASE ASC`;
   const rows = db.prepare(sql).all(params);
   return rows.map(rowToBook);
+}
+
+// Pendant papier de `documents.documentStats`. Le regroupement est fait par
+// SQLite : `listBooks` tirerait aussi les couvertures — plusieurs mégaoctets de
+// BLOB — pour n'en garder qu'un booléen.
+function bookStats(query) {
+  const { where, params } = bookFilter(query);
+  const groupBy = (expr) => db
+    .prepare(`SELECT ${expr} AS k, COUNT(*) AS c FROM books ${where} GROUP BY k`)
+    .all(params)
+    .map((r) => ({ key: r.k, count: r.c }));
+
+  const totals = db.prepare(`
+    SELECT COUNT(*) AS total,
+           SUM(cover IS NOT NULL) AS with_cover,
+           SUM(isbn IS NOT NULL AND isbn != '') AS with_isbn,
+           SUM(publishing_year IS NOT NULL) AS with_year,
+           SUM(genre IS NOT NULL) AS with_genre,
+           SUM(authors IS NOT NULL AND authors != '[]') AS with_author,
+           SUM(loaned) AS loaned
+    FROM books ${where}
+  `).get(params);
+
+  return {
+    totals,
+    lists: db.prepare(`SELECT authors, tags FROM books ${where}`).all(params),
+    year: groupBy('publishing_year'),
+    genre: groupBy('genre'),
+    room: groupBy('library'),
+    publisher: groupBy("NULLIF(TRIM(COALESCE(publisher, '')), '')"),
+    language: groupBy("NULLIF(TRIM(COALESCE(language, '')), '')"),
+    rating: groupBy('rating'),
+  };
 }
 
 // Le catalogue réunit les fiches papier et le cloud. Les filtres propres au
@@ -200,6 +241,126 @@ function listCatalog(query) {
   // de SQLite, qui ne connaît que l'ASCII et classerait « Édition » après « Zoo ».
   entries.sort((a, b) => String(a.title).localeCompare(String(b.title), 'fr', { sensitivity: 'base' }));
   return entries;
+}
+
+// --- Statistiques ---------------------------------------------------------
+//
+// Les agrégats portent sur la sélection décrite par les mêmes paramètres que la
+// grille, et réunissent les deux collections quand la sélection les contient
+// toutes les deux — un catalogue, un total.
+//
+// Chaque dimension est renvoyée triée et déjà réduite à ce qui est lisible : la
+// page ne fait plus que dessiner. Les entrées sans valeur ne sont pas jetées
+// mais comptées à part (`unknown`) : « 247 titres sans année » est une
+// information sur le catalogue, alors qu'une barre « (vide) » au milieu du
+// graphe n'en est pas une.
+
+function mergeCounts(...groups) {
+  const merged = new Map();
+  let unknown = 0;
+  for (const group of groups) {
+    for (const { key, count } of group || []) {
+      if (key === null || key === undefined || key === '') {
+        unknown += count;
+        continue;
+      }
+      merged.set(key, (merged.get(key) || 0) + count);
+    }
+  }
+  return { merged, unknown };
+}
+
+function countedList(groups, { sort = 'count', limit = 0, label = (k) => String(k) } = {}) {
+  const { merged, unknown } = mergeCounts(...groups);
+  let items = [...merged.entries()].map(([key, count]) => ({ key: String(key), label: label(key), count }));
+  if (sort === 'key') items.sort((a, b) => String(a.key).localeCompare(String(b.key), 'fr', { numeric: true }));
+  else items.sort((a, b) => b.count - a.count || String(a.label).localeCompare(String(b.label), 'fr'));
+
+  // Au-delà d'une dizaine de barres un classement ne se lit plus, et la méthode
+  // de dataviz refuse d'inventer des couleurs pour une queue longue : le reste
+  // est replié dans un « Autres » explicite, qui garde le total juste.
+  let other = 0;
+  if (limit && items.length > limit) {
+    other = items.slice(limit).reduce((sum, i) => sum + i.count, 0);
+    items = items.slice(0, limit);
+  }
+  return { items, unknown, other, distinct: merged.size };
+}
+
+// Auteurs et étiquettes sont des tableaux JSON : une fiche à trois auteurs
+// compte pour les trois. Les totaux de ces deux dimensions dépassent donc le
+// nombre de titres, ce que la page dit explicitement.
+function countJsonLists(rowSets, field) {
+  const counts = new Map();
+  let none = 0;
+  for (const rows of rowSets) {
+    for (const row of rows || []) {
+      let values;
+      try {
+        values = JSON.parse(row[field] || '[]');
+      } catch {
+        values = [];
+      }
+      if (!Array.isArray(values)) values = [];
+      const cleaned = values.map((v) => String(v).trim()).filter(Boolean);
+      if (!cleaned.length) {
+        none += 1;
+        continue;
+      }
+      for (const value of new Set(cleaned)) counts.set(value, (counts.get(value) || 0) + 1);
+    }
+  }
+  return { counts, none };
+}
+
+function jsonListStats(rowSets, field, limit) {
+  const { counts, none } = countJsonLists(rowSets, field);
+  const group = [...counts.entries()].map(([key, count]) => ({ key, count }));
+  const stats = countedList([group], { limit });
+  stats.unknown = none;
+  stats.distinct = counts.size;
+  return stats;
+}
+
+function computeStats(query, lang) {
+  const books = wantsBooks(query) ? bookStats(query) : null;
+  const docs = wantsDocuments(query) ? documents.documentStats(db, query) : null;
+
+  const bookTotals = books ? books.totals : {};
+  const docTotals = docs ? docs.totals : {};
+  const sum = (field) => Number(bookTotals[field] || 0) + Number(docTotals[field] || 0);
+
+  const genreCatalog = getGenres(lang);
+  const genreLabels = new Map(genreCatalog.genres.map((g) => [g.value, g.label]));
+
+  // Le cloud est une pièce du catalogue : il apparaît dans la répartition par
+  // pièce comme les autres, avec le nombre de documents sélectionnés.
+  const cloudRoom = docTotals.total ? [{ key: CLOUD, count: docTotals.total }] : [];
+
+  return {
+    total: sum('total'),
+    books: Number(bookTotals.total || 0),
+    documents: Number(docTotals.total || 0),
+    coverage: {
+      with_cover: sum('with_cover'),
+      with_isbn: sum('with_isbn'),
+      with_year: sum('with_year'),
+      with_genre: sum('with_genre'),
+      with_author: sum('with_author'),
+      loaned: Number(bookTotals.loaned || 0),
+    },
+    pages: Number(docTotals.pages || 0),
+    bytes: Number(docTotals.bytes || 0),
+    by_year: countedList([books?.year, docs?.year], { sort: 'key' }),
+    by_genre: countedList([books?.genre, docs?.genre], { label: (k) => genreLabels.get(k) || k }),
+    by_room: countedList([books?.room, cloudRoom]),
+    by_publisher: countedList([books?.publisher, docs?.publisher], { limit: 12 }),
+    by_language: countedList([books?.language, docs?.language]),
+    by_rating: countedList([books?.rating, docs?.rating], { sort: 'key' }),
+    by_format: countedList([docs?.format]),
+    by_author: jsonListStats([books?.lists, docs?.lists], 'authors', 12),
+    by_tag: jsonListStats([books?.lists, docs?.lists], 'tags', 12),
+  };
 }
 
 function getLibraries() {
@@ -632,6 +793,12 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'books') {
     const query = Object.fromEntries(url.searchParams.entries());
     return sendJson(res, 200, listCatalog(query));
+  }
+
+  // Mêmes paramètres de filtre que /api/books, agrégés au lieu d'être listés.
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'stats') {
+    const query = Object.fromEntries(url.searchParams.entries());
+    return sendJson(res, 200, computeStats(query, query.lang || 'fr'));
   }
 
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'libraries') {

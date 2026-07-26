@@ -113,7 +113,11 @@ const SORTS = {
   pages: 'pages DESC NULLS LAST',
 };
 
-function listDocuments(db, query) {
+// Le filtre est extrait de `listDocuments` parce que les statistiques doivent
+// porter sur *exactement* la même sélection que la grille : deux constructions
+// séparées finiraient par divergerie, et un total qui ne colle pas au nombre de
+// vignettes affichées est un bug qu'on ne voit qu'en comptant à la main.
+function documentFilter(query) {
   const clauses = [];
   const params = {};
 
@@ -148,11 +152,55 @@ function listDocuments(db, query) {
   if (query.no_author === '1') clauses.push(`(authors = '[]' OR authors LIKE '%Unknown%')`);
   if (query.not_indexed === '1') clauses.push('text_indexed_at IS NULL');
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+function listDocuments(db, query) {
+  const { where, params } = documentFilter(query);
   const order = SORTS[query.sort] || SORTS.title;
   return db.prepare(`SELECT ${DOCUMENT_COLUMNS} FROM documents ${where} ORDER BY ${order}`)
     .all(params)
     .map(rowToDocument);
+}
+
+// Agrégats de la collection numérique sur la sélection courante. Le regroupement
+// est fait par SQLite plutôt qu'en JavaScript sur les fiches : c'est le même
+// résultat, sans lire 1619 lignes ni déballer leurs résumés HTML pour n'en
+// compter que le format.
+function documentStats(db, query) {
+  const { where, params } = documentFilter(query);
+  const groupBy = (expr) => db
+    .prepare(`SELECT ${expr} AS k, COUNT(*) AS c FROM documents ${where} GROUP BY k`)
+    .all(params)
+    .map((r) => ({ key: r.k, count: r.c }));
+
+  const totals = db.prepare(`
+    SELECT COUNT(*) AS total,
+           SUM(cover_name IS NOT NULL) AS with_cover,
+           SUM(isbn IS NOT NULL AND isbn != '') AS with_isbn,
+           SUM(pub_year IS NOT NULL) AS with_year,
+           SUM(genre IS NOT NULL) AS with_genre,
+           SUM(authors != '[]' AND authors NOT LIKE '%Unknown%') AS with_author,
+           SUM(COALESCE(pages, 0)) AS pages,
+           SUM(COALESCE(primary_size, 0)) AS bytes
+    FROM documents ${where}
+  `).get(params);
+
+  // `authors` et `tags` sont des tableaux JSON : ni l'un ni l'autre ne se
+  // regroupe en SQL, donc ces deux colonnes-là — et elles seules — sont lues
+  // ligne à ligne.
+  const lists = db.prepare(`SELECT authors, tags FROM documents ${where}`).all(params);
+
+  return {
+    totals,
+    lists,
+    year: groupBy('pub_year'),
+    genre: groupBy('genre'),
+    publisher: groupBy("NULLIF(TRIM(COALESCE(publisher, '')), '')"),
+    language: groupBy("NULLIF(TRIM(COALESCE(language, '')), '')"),
+    rating: groupBy('rating'),
+    format: groupBy('primary_format'),
+  };
 }
 
 // Recherche *dans* les documents, par opposition à `listDocuments` qui cherche
@@ -430,5 +478,6 @@ function sendFile(req, res, abs, { contentType, filename, download = false } = {
 
 module.exports = {
   listDocuments, searchDocumentsText, getDocument, getFacets, updateDocument, toCatalogEntry,
+  documentStats,
   coverPath, filePath, sendFile, resolveInLibrary, FILE_TYPES, CLOUD_ROOM,
 };

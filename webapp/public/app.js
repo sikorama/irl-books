@@ -7,6 +7,7 @@
   const genreSelect = document.getElementById('genre-filter');
   const addGenreSelect = document.getElementById('add-genre-select');
   const flagInputs = [...document.querySelectorAll('.flag-filters input[data-flag]')];
+  const statsLink = document.getElementById('stats-link');
 
   const detailOverlay = document.getElementById('detail-overlay');
   const detailContent = document.getElementById('detail-content');
@@ -418,6 +419,10 @@
 
   async function loadBooks() {
     const qs = buildQuery();
+    // La page de statistiques lit les mêmes paramètres que cette grille : le lien
+    // les emporte, pour que « filtrer ici puis regarder les chiffres » porte sur
+    // exactement la sélection qu'on a sous les yeux.
+    if (statsLink) statsLink.href = `/stats.html${qs ? '?' + qs : ''}`;
     status.textContent = 'Loading…';
     const res = await fetch(`/api/books${qs ? '?' + qs : ''}`);
     const books = await res.json();

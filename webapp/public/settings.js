@@ -460,8 +460,67 @@
     }
   });
 
+  // --- Sous-sections -------------------------------------------------------
+  //
+  // Les quatre panneaux sont dans la page, un seul visible. La section active
+  // vit dans le fragment d'URL, pour qu'un rechargement — ou un signet — ramène
+  // là où on était.
+  //
+  // Seuls les doublons sont chargés à la demande : c'est le seul écran qui coûte
+  // un balayage de tout le catalogue, et on ne le paie donc que si on l'ouvre.
+
+  const PANELS = ['categories', 'duplicates', 'rooms', 'general'];
+  const tabs = [...document.querySelectorAll('.settings-tab')];
+  const loaded = new Set();
+
+  function activate(name, { push = true } = {}) {
+    const panel = PANELS.includes(name) ? name : PANELS[0];
+    for (const tab of tabs) {
+      const isCurrent = tab.dataset.panel === panel;
+      tab.classList.toggle('active', isCurrent);
+      tab.setAttribute('aria-selected', String(isCurrent));
+      // Un seul arrêt de tabulation dans la barre : les flèches circulent entre
+      // les onglets, comme dans n'importe quel jeu d'onglets.
+      tab.tabIndex = isCurrent ? 0 : -1;
+      document.getElementById(`panel-${tab.dataset.panel}`).classList.toggle('hidden', !isCurrent);
+    }
+    if (panel === 'duplicates' && !loaded.has('duplicates')) {
+      loaded.add('duplicates');
+      loadDuplicates();
+    }
+    if (push && location.hash.slice(1) !== panel) history.replaceState(null, '', `#${panel}`);
+  }
+
+  tabs.forEach((tab, index) => {
+    tab.addEventListener('click', () => activate(tab.dataset.panel));
+    tab.addEventListener('keydown', (e) => {
+      const delta = { ArrowRight: 1, ArrowLeft: -1, Home: -index, End: tabs.length - 1 - index }[e.key];
+      if (delta === undefined) return;
+      e.preventDefault();
+      const next = tabs[(index + delta + tabs.length) % tabs.length];
+      next.focus();
+      activate(next.dataset.panel);
+    });
+  });
+
+  // Renvoi d'un panneau à l'autre : la note des pièces pointe vers la pièce
+  // courante, qui est un réglage général.
+  for (const link of document.querySelectorAll('[data-goto-panel]')) {
+    link.addEventListener('click', () => {
+      activate(link.dataset.gotoPanel);
+      document.getElementById(`tab-${link.dataset.gotoPanel}`).focus();
+    });
+  }
+
+  window.addEventListener('hashchange', () => activate(location.hash.slice(1), { push: false }));
+
+  activate(location.hash.slice(1) || PANELS[0], { push: false });
+
+  // Les pièces alimentent deux panneaux (le renommage et le sélecteur de pièce
+  // courante) et les genres deux autres, donc les deux sont chargés d'emblée.
+  // Le travail sur les couvertures peut déjà tourner côté serveur : on se
+  // raccroche à son état sans attendre l'ouverture du panneau.
   loadLibraries();
   loadGenres();
-  loadDuplicates();
   resumeCoverJob();
 })();

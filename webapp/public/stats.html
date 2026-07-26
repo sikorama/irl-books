@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Statistics — IRL-Books</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>📊 Statistics</h1>
+  <div class="controls">
+    <input id="search" type="search" placeholder="Title, author, publisher, ISBN…">
+    <select id="library-filter">
+      <option value="">All rooms</option>
+    </select>
+    <select id="genre-filter">
+      <option value="">All genres</option>
+    </select>
+    <div class="flag-filters">
+      <label title="Loaned"><input type="checkbox" data-flag="loaned"> 🤝</label>
+      <label title="No cover"><input type="checkbox" data-flag="no_cover"> 🖼️</label>
+      <label title="No ISBN"><input type="checkbox" data-flag="no_isbn"> #️⃣</label>
+    </div>
+    <button id="reset-btn" class="secondary icon-btn" title="Clear the filters">🧹</button>
+    <a id="grid-link" href="/index.html" class="secondary icon-btn" title="See these titles in the catalog">📚</a>
+    <a href="/documents.html" class="secondary icon-btn" title="Cloud — documents">☁️</a>
+    <a href="/settings.html" class="secondary icon-btn" title="Settings">⚙️</a>
+  </div>
+  <div class="status" id="status"></div>
+</header>
+
+<main class="stats-main">
+  <section class="stats-hero">
+    <p class="hero-label" id="hero-label">Titles in this selection</p>
+    <p class="hero-figure" id="hero-figure">—</p>
+    <p class="hero-note" id="hero-note"></p>
+  </section>
+
+  <section class="kpi-row" id="kpi-row"></section>
+
+  <section class="stats-section">
+    <h2>Catalogue completeness</h2>
+    <p class="section-intro">Share of the selected titles that carry each field. These are the gaps worth filling — a missing year keeps a title out of the timeline below.</p>
+    <div class="meter-list" id="coverage-meters"></div>
+  </section>
+
+  <div id="charts" class="chart-list"></div>
+
+  <p id="stats-empty" class="empty hidden">No title matches these criteria — nothing to chart.</p>
+</main>
+
+<div id="chart-tooltip" class="chart-tooltip hidden" role="status" aria-live="polite"></div>
+
+<script src="/stats.js"></script>
+</body>
+</html>
