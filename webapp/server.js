@@ -13,7 +13,7 @@ const { lookupIsbn, imageSearchStream, hasGoogleBooksKey, describeGoogleBooksKey
 const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
 const documents = require('./lib/documents.js');
 const fts = require('./lib/docs-fts.js');
-const { indexDocuments, findCandidates } = require('./lib/text-index.js');
+const { indexDocuments, findCandidates, indexHealth } = require('./lib/text-index.js');
 
 // Usage: node server.js [--http]
 function parseArgs() {
@@ -672,14 +672,32 @@ async function handleDocumentsApi(req, res, url, parts) {
   if (parts.length >= 3 && parts[2] === 'index') {
     if (req.method === 'GET' && parts.length === 3) {
       const state = indexJob || { running: false, finished: false };
+      // `pending` seul ne dit pas si l'on repart de zéro ou si l'on reprend :
+      // un travail relancé après un redémarrage affiche « 0 / <ce qui reste> »,
+      // ce qui se lit comme un retour au début alors que c'est l'inverse. On
+      // renvoie donc aussi la taille du corpus indexable et le nombre déjà
+      // indexé, pour que la page puisse situer la progression sur l'ensemble.
       let pending = null;
+      let health = null;
       try {
         fts.attachFts(db, DB_PATH);
-        pending = findCandidates(db, { force: false }).length;
+        // Un seul parcours pour tout : le compte restant et la raison de chaque
+        // reprise. `indexHealth` sépare « jamais fait » de « index perdu », ce
+        // qui est la différence entre reprendre et refaire.
+        health = indexHealth(db);
+        pending = health.corpus - health.indexed;
       } catch {
         pending = null;
       }
-      return sendJson(res, 200, { ...state, pending });
+      return sendJson(res, 200, {
+        ...state,
+        pending,
+        corpus: health ? health.corpus : null,
+        indexed_total: health ? health.indexed : null,
+        index_lost: health ? health.index_lost : null,
+        file_changed: health ? health.file_changed : null,
+        fts_file: fts.ftsPath(DB_PATH),
+      });
     }
     if (req.method === 'POST' && parts.length === 4 && parts[3] === 'cancel') {
       if (!indexJob || !indexJob.running) return sendJson(res, 409, { error: 'No indexing in progress.' });

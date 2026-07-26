@@ -364,12 +364,25 @@
     indexCancelBtn.classList.toggle('hidden', !running);
     indexProgress.classList.toggle('hidden', !running || !state.total);
 
+    // L'indexation est incrémentale : un document indexé n'est jamais repris.
+    // Mais la barre ne connaissait que le travail du tour en cours, si bien
+    // qu'après un redémarrage elle repartait de 0 % — ce qui donne l'impression
+    // d'un retour au début alors que le tour ne porte plus que sur ce qui reste.
+    // On situe donc la progression sur le corpus entier, et on nomme ce qui était
+    // déjà fait avant ce tour.
+    const corpus = state.corpus;
+    const already = corpus != null && state.total != null ? Math.max(0, corpus - state.total) : 0;
+
     if (running) {
-      const pct = state.total ? Math.round((state.processed / state.total) * 100) : 0;
+      const overall = already + state.processed;
+      const pct = corpus ? Math.round((overall / corpus) * 100) : 0;
       indexProgress.value = pct;
       const current = state.current ? ` · ${state.current.title}` : '';
-      indexSummary.textContent = `Indexing ${state.processed}/${state.total} (${pct}%)`
-        + ` · ${state.indexed} done · ${state.failed} failed${current}`;
+      const resumed = already ? ` (${already} already indexed before this run)` : '';
+      indexSummary.textContent = corpus
+        ? `Indexing ${overall}/${corpus} (${pct}%)${resumed}`
+          + ` · ${state.processed}/${state.total} this run · ${state.failed} failed${current}`
+        : `Indexing ${state.processed}/${state.total} · ${state.failed} failed${current}`;
     } else if (state.error) {
       indexSummary.textContent = `Indexing stopped: ${state.error}`;
     } else if (state.finished) {
@@ -381,6 +394,18 @@
       indexSummary.textContent = 'Full-text index unavailable';
     } else if (pending === 0) {
       indexSummary.textContent = 'Full-text index up to date';
+    } else if (state.index_lost > 0) {
+      // La seule situation où du travail déjà fait doit être refait : l'index
+      // n'est plus là alors que les fiches se disent indexées. Le nommer évite
+      // d'attribuer la reprise à une indexation qui « ne serait pas
+      // incrémentale », et pointe la vraie cause — un fichier d'index perdu.
+      indexSummary.textContent = `${state.index_lost} document(s) were indexed but the index file no longer holds them`
+        + ' — it was emptied or lost, so their text has to be extracted again.'
+        + (pending > state.index_lost ? ` ${pending - state.index_lost} others were never indexed.` : '');
+    } else if (corpus && corpus > pending) {
+      // Le cas courant : dire ce qui est déjà en place, pour qu'un « Index
+      // text » relancé ne soit pas pris pour un travail repartant de zéro.
+      indexSummary.textContent = `${corpus - pending} of ${corpus} indexed · ${pending} still to do`;
     } else {
       indexSummary.textContent = `${pending} document(s) not indexed yet`;
     }

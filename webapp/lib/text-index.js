@@ -55,6 +55,37 @@ function findCandidates(db, { force = false } = {}) {
   return candidates;
 }
 
+// État de l'index, pour pouvoir répondre à « pourquoi ça recommence ? ».
+//
+// Trois raisons distinctes de reprendre un document, qu'il faut séparer sous
+// peine de conclure à tort que l'indexation n'est pas incrémentale :
+//   never          — jamais indexé, cas normal d'un travail à finir ;
+//   file_changed   — le fichier a bougé, son texte est à refaire ;
+//   index_lost     — la fiche se dit indexée mais l'index ne le contient pas.
+// Le dernier est le seul qui refasse du travail déjà fait, et il a une cause
+// unique : le fichier `docs-fts.db` a disparu ou été vidé. Il est annoncé comme
+// supprimable sans perte, donc cela arrive — volume non persisté entre deux
+// démarrages, ménage manuel — et il faut alors bien tout réextraire, puisque le
+// texte, lui, n'est plus là.
+function indexHealth(db) {
+  const rows = db.prepare(CANDIDATE_SQL).all();
+  const health = { corpus: 0, indexed: 0, never: 0, file_changed: 0, index_lost: 0 };
+  for (const row of rows) {
+    health.corpus++;
+    const sig = fileSignature(row);
+    if (row.text_indexed_at && row.text_sig === sig && row.in_index) {
+      health.indexed++;
+    } else if (!row.text_indexed_at) {
+      health.never++;
+    } else if (!row.in_index) {
+      health.index_lost++;
+    } else {
+      health.file_changed++;
+    }
+  }
+  return health;
+}
+
 async function indexOne(db, root, doc) {
   const abs = path.join(root, doc.dir, doc.file_name);
   const result = { id: doc.id, title: doc.title, status: 'indexed', chars: 0, truncated: false, error: null };
@@ -183,4 +214,4 @@ async function indexDocuments(db, options = {}) {
   return totals;
 }
 
-module.exports = { indexDocuments, findCandidates, INDEXABLE_FORMATS };
+module.exports = { indexDocuments, findCandidates, indexHealth, INDEXABLE_FORMATS };
