@@ -8,6 +8,14 @@
   const seriesSelect = document.getElementById('series-filter');
   const sortSelect = document.getElementById('sort-select');
   const flagInputs = [...document.querySelectorAll('.flag-filters input[data-flag]')];
+  const inTextToggle = document.getElementById('in-text');
+  const indexBar = document.getElementById('index-bar');
+  const indexSummary = document.getElementById('index-summary');
+  const indexProgress = document.getElementById('index-progress');
+  const indexStartBtn = document.getElementById('index-start-btn');
+  const indexCancelBtn = document.getElementById('index-cancel-btn');
+  const indexLogWrap = document.getElementById('index-log-wrap');
+  const indexLog = document.getElementById('index-log');
 
   const detailOverlay = document.getElementById('detail-overlay');
   const detailContent = document.getElementById('detail-content');
@@ -63,12 +71,30 @@
     return `/api/documents/${doc.id}/cover`;
   }
 
+  // En mode plein texte, l'ordre vient de la pertinence et les indicateurs
+  // d'anomalie ne s'appliquent pas : les contrôles correspondants sont désactivés
+  // plutôt que d'être ignorés en silence.
+  function textMode() {
+    return inTextToggle.checked && searchInput.value.trim().length > 0;
+  }
+
+  function syncControls() {
+    const inText = inTextToggle.checked;
+    sortSelect.disabled = inText;
+    flagInputs.forEach((i) => { i.disabled = inText; });
+    sortSelect.title = inText ? 'Sorted by relevance in full-text mode' : 'Sort';
+  }
+
   function buildQuery() {
     const params = new URLSearchParams();
     if (searchInput.value.trim()) params.set('q', searchInput.value.trim());
     if (formatSelect.value) params.set('format', formatSelect.value);
     if (genreSelect.value) params.set('genre', genreSelect.value);
     if (seriesSelect.value) params.set('series', seriesSelect.value);
+    if (textMode()) {
+      params.set('in_text', '1');
+      return params.toString();
+    }
     if (sortSelect.value && sortSelect.value !== 'title') params.set('sort', sortSelect.value);
     for (const input of flagInputs) {
       if (input.checked) params.set(input.dataset.flag, '1');
@@ -150,6 +176,7 @@
     if (doc.format) badges.push(`<span class="badge location">${escapeHtml(doc.format)}</span>`);
     badges.push(`<span class="badge genre">${escapeHtml(genreLabel(doc.genre) || 'No genre')}</span>`);
     if (doc.missing_count) badges.push('<span class="badge loaned">Missing</span>');
+    else if (!doc.file_count) badges.push('<span class="badge loaned">No file</span>');
 
     const subtitle = [doc.pub_year, formatSize(doc.size)].filter(Boolean).join(' · ');
 
@@ -165,6 +192,7 @@
         <p class="title">${escapeHtml(doc.title)}</p>
         <p class="authors">${escapeHtml(doc.authors.join(', ') || '—')}</p>
         <p class="isbn">${escapeHtml(subtitle || '—')}</p>
+        ${doc.snippet ? `<p class="doc-snippet">${doc.snippet}</p>` : ''}
       </div>
     `;
 
@@ -227,7 +255,8 @@
     for (const doc of docs) grid.appendChild(renderCard(doc));
     empty.classList.toggle('hidden', docs.length > 0);
     const bytes = docs.reduce((sum, d) => sum + (d.size || 0), 0);
-    status.textContent = `${docs.length} document${docs.length !== 1 ? 's' : ''} · ${formatSize(bytes)}`;
+    const label = `${docs.length} document${docs.length !== 1 ? 's' : ''} · ${formatSize(bytes)}`;
+    status.textContent = textMode() ? `${label} · by relevance` : label;
     updateSelectionUI();
   }
 
@@ -237,6 +266,7 @@
   }
 
   searchInput.addEventListener('input', debouncedLoad);
+  inTextToggle.addEventListener('change', () => { syncControls(); loadDocuments(); });
   [formatSelect, genreSelect, seriesSelect, sortSelect].forEach((el) => el.addEventListener('change', loadDocuments));
   flagInputs.forEach((i) => i.addEventListener('change', loadDocuments));
 
@@ -307,9 +337,105 @@
     document.querySelectorAll('.overlay:not(.hidden)').forEach((o) => o.classList.add('hidden'));
   });
 
+  // --- Indexation du texte -------------------------------------------------
+  //
+  // Le travail dure vingt à quarante minutes côté serveur : la page ne fait que
+  // sonder son état. Le sondage s'arrête dès que le travail est fini, pour ne pas
+  // interroger le serveur indéfiniment.
+  let indexPollTimer = null;
+
+  function renderIndexState(state) {
+    const running = !!state.running;
+    const pending = state.pending;
+
+    indexStartBtn.classList.toggle('hidden', running);
+    indexCancelBtn.classList.toggle('hidden', !running);
+    indexProgress.classList.toggle('hidden', !running || !state.total);
+
+    if (running) {
+      const pct = state.total ? Math.round((state.processed / state.total) * 100) : 0;
+      indexProgress.value = pct;
+      const current = state.current ? ` · ${state.current.title}` : '';
+      indexSummary.textContent = `Indexing ${state.processed}/${state.total} (${pct}%)`
+        + ` · ${state.indexed} done · ${state.failed} failed${current}`;
+    } else if (state.error) {
+      indexSummary.textContent = `Indexing stopped: ${state.error}`;
+    } else if (state.finished) {
+      indexSummary.textContent = `Indexed ${state.indexed} document(s)`
+        + (state.empty ? `, ${state.empty} with no usable text` : '')
+        + (state.failed ? `, ${state.failed} failed` : '')
+        + (pending ? ` · ${pending} still to do` : ' · index up to date');
+    } else if (pending === null) {
+      indexSummary.textContent = 'Full-text index unavailable';
+    } else if (pending === 0) {
+      indexSummary.textContent = 'Full-text index up to date';
+    } else {
+      indexSummary.textContent = `${pending} document(s) not indexed yet`;
+    }
+
+    // Le journal ne retient que les anomalies : un PDF sans couche texte est
+    // presque toujours un scan, et c'est la liste de ce qui gagnerait une OCR.
+    const entries = state.log || [];
+    indexLogWrap.classList.toggle('hidden', entries.length === 0);
+    if (entries.length) {
+      indexLog.innerHTML = entries.map((e) => `<li>${escapeHtml(e.title || '#' + e.id)}`
+        + ` — ${escapeHtml(e.status === 'empty' ? 'no text (scan?)' : e.error || e.status)}</li>`).join('');
+    }
+
+    // Une seule condition pour continuer à sonder : le travail tourne encore.
+    if (running) {
+      if (!indexPollTimer) indexPollTimer = setInterval(pollIndex, 1500);
+    } else if (indexPollTimer) {
+      clearInterval(indexPollTimer);
+      indexPollTimer = null;
+      loadFacets();
+      loadDocuments();
+    }
+  }
+
+  async function pollIndex() {
+    try {
+      const res = await fetch('/api/documents/index');
+      renderIndexState(await res.json());
+    } catch {
+      // Serveur momentanément occupé par une extraction : on réessaiera au
+      // prochain tour plutôt que d'afficher une erreur passagère.
+    }
+  }
+
+  indexStartBtn.addEventListener('click', async () => {
+    indexStartBtn.disabled = true;
+    try {
+      const res = await fetch('/api/documents/index', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Unknown error');
+      renderIndexState({ ...data, pending: null });
+    } catch (e) {
+      indexSummary.textContent = e.message;
+    } finally {
+      indexStartBtn.disabled = false;
+    }
+  });
+
+  indexCancelBtn.addEventListener('click', async () => {
+    indexCancelBtn.disabled = true;
+    try {
+      await fetch('/api/documents/index/cancel', { method: 'POST' });
+    } finally {
+      indexCancelBtn.disabled = false;
+    }
+  });
+
   (async () => {
+    syncControls();
     await loadGenres();
     await loadFacets();
     await loadDocuments();
+    indexBar.classList.remove('hidden');
+    await pollIndex();
   })();
 })();

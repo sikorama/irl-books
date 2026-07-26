@@ -4,6 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const fts = require('./docs-fts.js');
 
 const DOCUMENT_COLUMNS = `
   id, calibre_id, dir, cover_name, title, authors, series, series_index,
@@ -12,6 +13,30 @@ const DOCUMENT_COLUMNS = `
   primary_format, primary_size, file_count, missing_count, text_indexed_at,
   created_at, updated_at
 `;
+
+// Les résumés viennent de Calibre, qui les récupère de sources web : c'est du
+// HTML d'origine non contrôlée, et le panneau détail l'affiche en innerHTML.
+// Plutôt qu'une liste blanche de balises à maintenir, on ne garde que le texte et
+// les sauts de paragraphe — 28 fiches concernées, la mise en forme n'y vaut pas
+// une surface d'attaque.
+function stripHtml(html) {
+  if (!html) return null;
+  const text = String(html)
+    .replace(/<\s*(script|style)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, ' ')
+    .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+    .replace(/<\s*\/\s*(p|div|li|h[1-6])\s*>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return text || null;
+}
 
 function rowToDocument(row) {
   return {
@@ -33,7 +58,7 @@ function rowToDocument(row) {
     genre: row.genre,
     rating: row.rating,
     notes: row.notes,
-    comments: row.comments,
+    comments: stripHtml(row.comments),
     redd: !!row.redd,
     meta_source: row.meta_source,
     format: row.primary_format,
@@ -75,6 +100,7 @@ function toCatalogEntry(doc) {
     size: doc.size,
     pub_year: doc.pub_year,
     missing_count: doc.missing_count,
+    file_count: doc.file_count,
   };
 }
 
@@ -114,7 +140,10 @@ function listDocuments(db, query) {
     params.language = query.language;
   }
   if (query.no_cover === '1') clauses.push('cover_name IS NULL');
-  if (query.missing === '1') clauses.push('missing_count > 0');
+  // Deux anomalies distinctes, un seul filtre : un fichier annoncé par Calibre
+  // mais absent du disque, et une fiche qui n'a jamais eu de fichier (10 cas sur
+  // 1619). La seconde a missing_count = 0 et serait passée sous le radar.
+  if (query.missing === '1') clauses.push('(missing_count > 0 OR file_count = 0)');
   if (query.no_author === '1') clauses.push(`(authors = '[]' OR authors LIKE '%Unknown%')`);
   if (query.not_indexed === '1') clauses.push('text_indexed_at IS NULL');
 
@@ -123,6 +152,47 @@ function listDocuments(db, query) {
   return db.prepare(`SELECT ${DOCUMENT_COLUMNS} FROM documents ${where} ORDER BY ${order}`)
     .all(params)
     .map(rowToDocument);
+}
+
+// Recherche *dans* les documents, par opposition à `listDocuments` qui cherche
+// dans les métadonnées. Les deux sont volontairement distinctes : sur ce corpus
+// de papiers et de datasheets, 37 % des auteurs valent « Unknown » et beaucoup de
+// titres sont des noms de fichier — chercher dans le contenu est souvent le seul
+// moyen de retrouver un document, mais le résultat est classé par pertinence et
+// non par titre, ce qui n'est pas le même outil.
+function searchDocumentsText(db, dbPath, query, filters = {}) {
+  fts.attachFts(db, dbPath);
+  const hits = fts.searchText(db, query, { limit: 300 });
+  if (!hits.length) return [];
+
+  const byId = new Map(hits.map((h) => [h.document_id, h]));
+  const ids = [...byId.keys()];
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT ${DOCUMENT_COLUMNS} FROM documents WHERE id IN (${placeholders})
+  `).all(...ids);
+
+  // L'ordre de pertinence de FTS5 fait foi : on le réapplique après le SELECT,
+  // qui l'aurait perdu.
+  const docs = rows
+    .map((row) => {
+      const doc = rowToDocument(row);
+      const hit = byId.get(doc.id);
+      doc.snippet = hit.snippet;
+      doc.score = hit.score;
+      return doc;
+    })
+    .filter((doc) => {
+      if (filters.format && doc.format !== filters.format) return false;
+      if (filters.genre) {
+        if (filters.genre === '(aucun)') return doc.genre !== null;
+        if (doc.genre !== filters.genre) return false;
+      }
+      if (filters.series && doc.series !== filters.series) return false;
+      return true;
+    })
+    .sort((a, b) => a.score - b.score);
+  return docs;
 }
 
 function getDocument(db, id) {
@@ -166,7 +236,7 @@ function getFacets(db) {
     no_genre_count: db.prepare('SELECT COUNT(*) c FROM documents WHERE genre IS NULL').get().c,
     counts: db.prepare(`
       SELECT SUM(cover_name IS NULL) no_cover,
-             SUM(missing_count > 0) missing,
+             SUM(missing_count > 0 OR file_count = 0) missing,
              SUM(text_indexed_at IS NULL) not_indexed,
              SUM(primary_size) bytes
         FROM documents
@@ -353,6 +423,6 @@ function sendFile(req, res, abs, { contentType, filename, download = false } = {
 }
 
 module.exports = {
-  listDocuments, getDocument, getFacets, updateDocument, toCatalogEntry,
+  listDocuments, searchDocumentsText, getDocument, getFacets, updateDocument, toCatalogEntry,
   coverPath, filePath, sendFile, resolveInLibrary, FILE_TYPES, CLOUD_ROOM,
 };

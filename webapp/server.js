@@ -5,12 +5,14 @@ const https = require('https');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { openDb, LIBRARY_ROOT } = require('./lib/db.js');
+const { openDb, DB_PATH, LIBRARY_ROOT } = require('./lib/db.js');
 const { buildEpub } = require('./lib/epub.js');
 const { GENRES, guessGenre } = require('./lib/categorize.js');
 const { lookupIsbn, imageSearchStream, hasGoogleBooksKey, describeGoogleBooksKey } = require('./lib/lookup.js');
 const { upgradeCovers, DEFAULT_MIN_WIDTH } = require('./lib/covers.js');
 const documents = require('./lib/documents.js');
+const fts = require('./lib/docs-fts.js');
+const { indexDocuments, findCandidates } = require('./lib/text-index.js');
 
 // Usage: node server.js [--http]
 function parseArgs() {
@@ -370,6 +372,78 @@ function startCoverUpgrade({ minWidth, dryRun }) {
   return job;
 }
 
+// L'indexation des 1501 PDF dure vingt à quarante minutes : elle tourne en tâche
+// de fond et la page interroge son état, exactement comme l'upgrade des
+// couvertures. Un seul travail à la fois, conservé en mémoire après la fin pour
+// que le résultat survive à un rechargement de page.
+const INDEX_JOB_LOG_MAX = 80;
+let indexJob = null;
+
+function startTextIndex({ force, limit }) {
+  const job = {
+    running: true,
+    cancelled: false,
+    force,
+    total: null,
+    processed: 0,
+    indexed: 0,
+    empty: 0,
+    failed: 0,
+    truncated: 0,
+    chars: 0,
+    current: null,
+    started_at: new Date().toISOString(),
+    log: [],
+    error: null,
+    finished: false,
+  };
+  indexJob = job;
+
+  // Lancé sans être attendu : la réponse 202 part immédiatement et le travail se
+  // poursuit en tâche de fond. L'extraction passe par `spawn`, donc poppler
+  // tourne dans un autre processus et le serveur reste joignable pendant les
+  // quarante minutes — c'est ce qui permet de suivre la progression depuis la
+  // page pendant que ça travaille.
+  (async () => {
+    try {
+      const totals = await indexDocuments(db, {
+        root: LIBRARY_ROOT,
+        dbPath: DB_PATH,
+        force,
+        limit,
+        onStart: (total) => { job.total = total; },
+        onProgress: (event, totals2) => {
+          Object.assign(job, {
+            processed: totals2.processed,
+            indexed: totals2.indexed,
+            empty: totals2.empty,
+            failed: totals2.failed,
+            truncated: totals2.truncated,
+            chars: totals2.chars,
+            current: { id: event.id, title: event.title },
+          });
+          if (event.status === 'indexed') return;
+          job.log.push({
+            id: event.id, title: event.title, status: event.status, error: event.error || null,
+          });
+          if (job.log.length > INDEX_JOB_LOG_MAX) job.log.shift();
+        },
+        shouldStop: () => job.cancelled,
+      });
+      job.remaining = findCandidates(db, { force: false }).length;
+      Object.assign(job, totals);
+    } catch (e) {
+      job.error = e.message;
+    } finally {
+      job.running = false;
+      job.current = null;
+      job.finished = true;
+    }
+  })();
+
+  return job;
+}
+
 function serveStatic(req, res, urlPath) {
   let rel = urlPath === '/' ? '/index.html' : urlPath;
   rel = rel.split('?')[0];
@@ -398,15 +472,66 @@ function serveStatic(req, res, urlPath) {
 // recherche, genres) est commun.
 
 async function handleDocumentsApi(req, res, url, parts) {
-  // GET /api/documents
+  // GET /api/documents  (in_text=1 pour chercher dans le contenu)
   if (req.method === 'GET' && parts.length === 2) {
     const query = Object.fromEntries(url.searchParams.entries());
+    if (query.in_text === '1' && query.q) {
+      try {
+        return sendJson(res, 200, documents.searchDocumentsText(db, DB_PATH, query.q, query));
+      } catch (e) {
+        return sendJson(res, 500, { error: `Full-text search failed: ${e.message}` });
+      }
+    }
     return sendJson(res, 200, documents.listDocuments(db, query));
+  }
+
+  // Pilotage de l'indexation : GET l'état, POST pour lancer, POST /cancel pour
+  // interrompre. Même protocole que /api/covers/upgrade.
+  if (parts.length >= 3 && parts[2] === 'index') {
+    if (req.method === 'GET' && parts.length === 3) {
+      const state = indexJob || { running: false, finished: false };
+      let pending = null;
+      try {
+        fts.attachFts(db, DB_PATH);
+        pending = findCandidates(db, { force: false }).length;
+      } catch {
+        pending = null;
+      }
+      return sendJson(res, 200, { ...state, pending });
+    }
+    if (req.method === 'POST' && parts.length === 4 && parts[3] === 'cancel') {
+      if (!indexJob || !indexJob.running) return sendJson(res, 409, { error: 'No indexing in progress.' });
+      indexJob.cancelled = true;
+      return sendJson(res, 200, indexJob);
+    }
+    if (req.method === 'POST' && parts.length === 3) {
+      if (indexJob && indexJob.running) {
+        return sendJson(res, 409, { error: 'An indexing run is already in progress.' });
+      }
+      let payload = {};
+      try {
+        const raw = await readBody(req);
+        if (raw.length) payload = JSON.parse(raw.toString('utf8'));
+      } catch (e) {
+        return sendJson(res, 400, { error: `Invalid body: ${e.message}` });
+      }
+      const limit = Number.isFinite(Number(payload.limit)) && Number(payload.limit) > 0
+        ? Math.trunc(Number(payload.limit))
+        : Infinity;
+      return sendJson(res, 202, startTextIndex({ force: !!payload.force, limit }));
+    }
   }
 
   // GET /api/documents/facets
   if (req.method === 'GET' && parts.length === 3 && parts[2] === 'facets') {
-    return sendJson(res, 200, { ...documents.getFacets(db), library_root: LIBRARY_ROOT });
+    let index = null;
+    try {
+      fts.attachFts(db, DB_PATH);
+      index = { ...fts.stats(db), pending: findCandidates(db, { force: false }).length };
+    } catch {
+      index = null;
+    }
+    return sendJson(res, 200, { ...documents.getFacets(db), library_root: LIBRARY_ROOT, index });
   }
 
   // POST /api/documents/set-genre

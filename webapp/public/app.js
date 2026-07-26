@@ -255,6 +255,7 @@
     badges.push(`<span class="badge genre">${escapeHtml(genreLabel(entry.genre) || 'No genre')}</span>`);
     if (entry.loaned) badges.push('<span class="badge loaned">Loaned</span>');
     if (isDoc && entry.missing_count) badges.push('<span class="badge loaned">Missing</span>');
+    else if (isDoc && !entry.file_count) badges.push('<span class="badge loaned">No file</span>');
 
     const thirdLine = isDoc
       ? [entry.pub_year, formatSize(entry.size)].filter(Boolean).join(' · ')

@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS documents (
   file_count INTEGER NOT NULL DEFAULT 0,
   missing_count INTEGER NOT NULL DEFAULT 0,
   text_indexed_at TEXT,
+  text_sig TEXT,
+  text_chars INTEGER,
+  text_truncated INTEGER NOT NULL DEFAULT 0,
+  text_error TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -83,8 +87,25 @@ const CALIBRE_META_COLUMNS = [
   'comments',
 ];
 
+// La table `documents` existe déjà sur les installations où l'import Calibre a
+// tourné avant la phase d'indexation : les colonnes de suivi du texte sont donc
+// ajoutées après coup plutôt que dans le CREATE TABLE.
+const TEXT_COLUMNS = [
+  ['text_sig', 'TEXT'],
+  ['text_chars', 'INTEGER'],
+  ['text_truncated', 'INTEGER NOT NULL DEFAULT 0'],
+  ['text_error', 'TEXT'],
+];
+
 function ensureDocumentsSchema(db) {
   db.exec(DOCUMENTS_SCHEMA);
+  const columns = db.prepare('PRAGMA table_info(documents)').all().map((c) => c.name);
+  for (const [name, decl] of TEXT_COLUMNS) {
+    if (!columns.includes(name)) db.exec(`ALTER TABLE documents ADD COLUMN ${name} ${decl}`);
+  }
+  // Après les ALTER, jamais avant : sur une base où l'import Calibre a déjà
+  // tourné, la colonne n'existe pas encore quand le schéma initial est rejoué.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_documents_text_sig ON documents(text_sig)');
 }
 
 // Ordre de préférence du format « principal » — celui qu'on ouvre, qu'on indexe

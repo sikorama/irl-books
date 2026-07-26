@@ -677,6 +677,7 @@ form .form-grid { display: flex; gap: 1.2rem; flex-wrap: wrap; }
 }
 
 .doc-comments {
+  white-space: pre-wrap;
   font-size: 0.8rem;
   color: var(--text-dim);
   line-height: 1.5;
@@ -706,3 +707,57 @@ form .form-grid { display: flex; gap: 1.2rem; flex-wrap: wrap; }
    déménage pas un fichier dans le Grenier. Elle reste donc inerte au survol. */
 .badge.location.cloud { cursor: default; }
 .badge.location.cloud:hover { filter: none; }
+
+/* --- Index plein texte ----------------------------------------------------- */
+
+.in-text-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.in-text-toggle input { margin: 0; }
+
+.index-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.index-bar progress { width: 12rem; height: 0.5rem; }
+.index-bar button { font-size: 0.78rem; padding: 0.25rem 0.6rem; }
+
+.index-log-wrap { flex-basis: 100%; }
+.index-log-wrap summary { cursor: pointer; }
+.index-log-wrap ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  max-height: 11rem;
+  overflow-y: auto;
+  font-size: 0.75rem;
+}
+
+/* L'extrait de recherche plein texte, sous les métadonnées de la carte. */
+.doc-snippet {
+  margin: 0.35rem 0 0;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  padding-top: 0.35rem;
+  max-height: 4.2rem;
+  overflow: hidden;
+}
+.doc-snippet mark {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: 2px;
+  padding: 0 0.1em;
+}

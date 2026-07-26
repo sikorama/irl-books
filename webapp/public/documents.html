@@ -27,10 +27,13 @@
       <option value="year">Newest</option>
       <option value="pages">Most pages</option>
     </select>
+    <label class="in-text-toggle" title="Search inside the documents, not just their metadata">
+      <input type="checkbox" id="in-text"> 🔎 in text
+    </label>
     <div class="flag-filters">
       <label title="No cover"><input type="checkbox" data-flag="no_cover"> 🖼️</label>
       <label title="Unknown author"><input type="checkbox" data-flag="no_author"> 👤</label>
-      <label title="File missing from disk"><input type="checkbox" data-flag="missing"> ⚠️</label>
+      <label title="File missing, or no file at all"><input type="checkbox" data-flag="missing"> ⚠️</label>
     </div>
     <button id="select-toggle-btn" class="secondary icon-btn" title="Select">☑️</button>
     <a href="/index.html" class="secondary icon-btn" title="Whole catalog">📚</a>
@@ -47,6 +50,17 @@
   </select>
   <button id="genre-btn" class="primary icon-btn" title="Apply genre" disabled>🏷️</button>
   <button id="cancel-select-btn" class="secondary icon-btn" title="Cancel">✕</button>
+</div>
+
+<div id="index-bar" class="index-bar hidden">
+  <span id="index-summary"></span>
+  <progress id="index-progress" class="hidden" max="100" value="0"></progress>
+  <button id="index-start-btn" class="secondary">Index text</button>
+  <button id="index-cancel-btn" class="secondary hidden">Stop</button>
+  <details id="index-log-wrap" class="index-log-wrap hidden">
+    <summary>Documents with no usable text</summary>
+    <ul id="index-log"></ul>
+  </details>
 </div>
 
 <main>
