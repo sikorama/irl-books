@@ -479,6 +479,25 @@ form .form-grid .cover-col { width: 180px; }
 }
 .cover-picker span { font-size: 0.75rem; color: var(--text-dim); text-align: center; }
 
+/* Sur un téléphone, la colonne des champs passe sous la couverture : celle-ci se
+   retrouve seule sur sa ligne, et la garder à 180px laissait un bon tiers de la
+   largeur vide à côté — une vignette perdue au milieu de l'écran. Elle prend
+   donc la place de sa ligne.
+   C'est la hauteur qui mène le dimensionnement, pas la largeur : une couverture
+   est un portrait, et la consigne tient toujours — elle ne doit pas occuper
+   toute la largeur de la fenêtre. 80 % laissent une marge visible de chaque
+   côté, et `contain` fait grandir jusqu'à ce cadre même une petite vignette
+   rapportée par un catalogue.
+   Le seuil est celui où la mise en page bascule d'elle-même sur deux lignes
+   (180 + gouttière + 260 de base pour les champs) : au-dessus, la vignette garde
+   sa taille de bureau, à côté des champs. */
+@media (max-width: 560px) {
+  form .form-grid .cover-col { width: 100%; align-items: center; }
+  form .form-grid .cover-picker { width: min(80%, 16rem); }
+  form .form-grid .cover-picker img { height: min(46vh, 340px); }
+  form .form-grid .cover-search-actions { width: min(80%, 16rem); }
+}
+
 /* `min-width: 0` parce qu'un élément flex refuse par défaut de passer sous la
    largeur minimale de son contenu : la rangée ISBN (champ + trois boutons de
    largeur fixe) tenait ainsi la colonne à 384px et faisait déborder la fenêtre
