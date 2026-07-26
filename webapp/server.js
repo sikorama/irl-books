@@ -199,13 +199,17 @@ function wantsBooks(query) {
   return !query.library || query.library !== CLOUD;
 }
 
+// Le cloud est une pièce du catalogue, mais il ne s'invite plus de lui-même :
+// les 1600 documents numériques noieraient les fiches papier qu'on est en train
+// de ranger. Ils entrent sur demande — la bascule ☁️ — ou d'office quand c'est
+// la pièce « cloud » qu'on a choisie, puisque alors on ne cherche rien d'autre.
 function wantsDocuments(query) {
-  if (query.library && query.library !== CLOUD) return false;
+  if (query.library) return query.library === CLOUD;
   // « prêté » et « sans ISBN » sont des notions de livre physique : les activer
   // veut dire qu'on cherche dans le papier.
   if (query.loaned === '1' || query.loaned === '0') return false;
   if (query.no_isbn === '1') return false;
-  return true;
+  return query.cloud === '1';
 }
 
 // Les actions groupées reçoivent des `uid` (« b12 », « d34 ») parce qu'une

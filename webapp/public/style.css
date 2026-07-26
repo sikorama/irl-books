@@ -43,6 +43,18 @@ body {
 
 .topbar h1 { margin: 0 0 0.75rem; font-size: 1.3rem; }
 
+/* La ligne du titre porte l'action qui n'est pas un filtre : la flèche de retour
+   à gauche sur les pages secondaires, le bouton d'ajout calé à droite sur la
+   bibliothèque. Le titre prend la place restante, donc les deux se placent sans
+   dépendre de leur ordre dans le balisage. */
+.topbar-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+.topbar-head h1 { flex: 1; margin: 0; min-width: 0; }
+
 .controls {
   display: flex;
   flex-wrap: wrap;

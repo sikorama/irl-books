@@ -7,6 +7,7 @@
   const genreSelect = document.getElementById('genre-filter');
   const addGenreSelect = document.getElementById('add-genre-select');
   const flagInputs = [...document.querySelectorAll('.flag-filters input[data-flag]')];
+  const cloudToggle = document.getElementById('cloud-toggle');
   const statsLink = document.getElementById('stats-link');
 
   const detailOverlay = document.getElementById('detail-overlay');
@@ -363,6 +364,9 @@
     if (searchInput.value.trim()) params.set('q', searchInput.value.trim());
     if (libSelect.value) params.set('library', libSelect.value);
     if (genreSelect.value) params.set('genre', genreSelect.value);
+    // Les documents numériques n'entrent que sur demande — le serveur ne les
+    // ajoute au catalogue que si ce drapeau est là.
+    if (cloudToggle.checked) params.set('cloud', '1');
     for (const input of flagInputs) {
       if (input.checked) params.set(input.dataset.flag, '1');
     }
@@ -620,8 +624,20 @@
   }
 
   searchInput.addEventListener('input', debouncedLoad);
-  libSelect.addEventListener('change', loadBooks);
+  libSelect.addEventListener('change', () => {
+    // Choisir la pièce « cloud » puis ne rien voir serait absurde : la bascule
+    // suit. Elle n'est pas remise à zéro en sortant du cloud — c'est un choix
+    // que l'utilisateur défait lui-même, comme les autres filtres.
+    if (libSelect.value === CLOUD_ROOM) cloudToggle.checked = true;
+    loadBooks();
+  });
   genreSelect.addEventListener('change', loadBooks);
+  cloudToggle.addEventListener('change', () => {
+    // Décocher alors qu'on regarde justement la pièce cloud viderait la grille
+    // sans rien expliquer : on revient à toutes les pièces.
+    if (!cloudToggle.checked && libSelect.value === CLOUD_ROOM) libSelect.value = '';
+    loadBooks();
+  });
   flagInputs.forEach((i) => i.addEventListener('change', loadBooks));
 
   selectToggleBtn.addEventListener('click', () => setSelectMode(!selectMode));
@@ -1043,11 +1059,24 @@
     addOverlay.classList.remove('hidden');
   }
 
-  document.getElementById('add-book-btn').addEventListener('click', openAddForm);
-
-  document.getElementById('scan-book-btn').addEventListener('click', () => {
+  // Un seul bouton pour ajouter un livre. Les deux d'avant — « ajouter » et
+  // « scanner » — menaient au même formulaire ; celui-ci commence par la caméra,
+  // parce que scanner le code-barres est le geste courant et la saisie complète
+  // l'exception. Sans caméra (ordinateur de bureau, HTTP sans TLS, permission
+  // refusée) la fenêtre de scan se referme aussitôt et le formulaire, déjà
+  // ouvert derrière, prend le relais : jamais d'impasse.
+  document.getElementById('add-book-btn').addEventListener('click', async () => {
     openAddForm();
-    scanIsbnIntoAddForm();
+    const started = await startScanner((code) => {
+      isbnInput.value = code;
+      addFormScannerUsed = true;
+      lookupIsbn();
+    }, { quiet: true });
+    if (!started) {
+      stopScanner();
+      isbnLookupStatus.textContent = 'No camera available — type the ISBN, or fill the fields by hand.';
+      isbnInput.focus();
+    }
   });
 
   let zxingReader = null;
@@ -1059,13 +1088,18 @@
     scanOverlay.classList.add('hidden');
   }
 
-  async function startScanner(onDecoded) {
+  // Renvoie `true` si la caméra a démarré. L'appelant peut donc enchaîner sur
+  // autre chose quand il n'y en a pas — c'est ce qui permet au bouton d'ajout
+  // unique de retomber sur la saisie manuelle. `quiet` supprime le message
+  // d'erreur dans la fenêtre de scan, pour les appelants qui ont un plan B et
+  // n'ont pas besoin d'annoncer une panne.
+  async function startScanner(onDecoded, { quiet = false } = {}) {
     scanStatus.textContent = 'Starting the camera…';
     scanOverlay.classList.remove('hidden');
 
     if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      scanStatus.textContent = 'Camera unavailable: the site must be served over HTTPS to access it from a phone (see README).';
-      return;
+      if (!quiet) scanStatus.textContent = 'Camera unavailable: the site must be served over HTTPS to access it from a phone (see README).';
+      return false;
     }
 
     let handled = false;
@@ -1093,8 +1127,10 @@
           onDecoded(code);
         },
       );
+      return true;
     } catch (e) {
-      scanStatus.textContent = `Camera error: ${e.message}`;
+      if (!quiet) scanStatus.textContent = `Camera error: ${e.message}`;
+      return false;
     }
   }
 
@@ -1367,14 +1403,47 @@
     }
   });
 
-  Promise.all([loadLibraries(), loadGenres(), loadLanguages()]).then(loadBooks).then(() => {
+  // Un filtre nommé dans l'URL qui n'existe pas dans la liste est ajouté plutôt
+  // qu'ignoré : une pièce vide n'apparaît pas au catalogue des pièces, et sans
+  // cela `?library=cloud` retomberait en silence sur « toutes les pièces » —
+  // c'est-à-dire sur une grille qui n'est pas celle qu'on a demandée.
+  function selectValue(select, value) {
+    select.value = value;
+    if (select.value === value) return;
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = `${value} (0)`;
+    select.appendChild(opt);
+    select.value = value;
+  }
+
+  // La bibliothèque lit ses filtres dans l'URL : c'est ce qui fait qu'un lien
+  // venu de la page de statistiques — « voir ces titres dans le catalogue » —
+  // arrive sur la même sélection que celle qu'on y regardait.
+  function applyUrlFilters() {
     const params = new URLSearchParams(window.location.search);
-    const openBookId = params.get('openBook');
-    if (openBookId) {
-      openDetail(Number(openBookId));
-      params.delete('openBook');
-      const query = params.toString();
-      window.history.replaceState({}, '', window.location.pathname + (query ? `?${query}` : ''));
+    if (params.has('q')) searchInput.value = params.get('q');
+    if (params.has('genre')) selectValue(genreSelect, params.get('genre'));
+    if (params.has('library')) selectValue(libSelect, params.get('library'));
+    cloudToggle.checked = params.get('cloud') === '1' || params.get('library') === CLOUD_ROOM;
+    for (const input of flagInputs) {
+      if (params.get(input.dataset.flag) === '1') input.checked = true;
     }
-  });
+  }
+
+  Promise.all([loadLibraries(), loadGenres(), loadLanguages()])
+    .then(() => {
+      applyUrlFilters();
+      return loadBooks();
+    })
+    .then(() => {
+      const params = new URLSearchParams(window.location.search);
+      const openBookId = params.get('openBook');
+      if (openBookId) {
+        openDetail(Number(openBookId));
+        params.delete('openBook');
+        const query = params.toString();
+        window.history.replaceState({}, '', window.location.pathname + (query ? `?${query}` : ''));
+      }
+    });
 })();

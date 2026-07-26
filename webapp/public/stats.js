@@ -9,6 +9,7 @@
   const libSelect = document.getElementById('library-filter');
   const genreSelect = document.getElementById('genre-filter');
   const flagInputs = [...document.querySelectorAll('.flag-filters input[data-flag]')];
+  const cloudToggle = document.getElementById('cloud-toggle');
   const resetBtn = document.getElementById('reset-btn');
   const gridLink = document.getElementById('grid-link');
   const statusEl = document.getElementById('status');
@@ -574,6 +575,10 @@
     if (searchInput.value.trim()) params.set('q', searchInput.value.trim());
     if (libSelect.value) params.set('library', libSelect.value);
     if (genreSelect.value) params.set('genre', genreSelect.value);
+    // Comme dans la bibliothèque : les documents numériques ne comptent que si
+    // on les demande, sinon les statistiques porteraient sur un ensemble plus
+    // large que la grille d'où l'on vient.
+    if (cloudToggle.checked) params.set('cloud', '1');
     for (const input of flagInputs) {
       if (input.checked) params.set(input.dataset.flag, '1');
     }
@@ -588,8 +593,9 @@
       const opt = genreSelect.selectedOptions[0];
       bits.push(`categorized as ${opt ? opt.textContent.replace(/\s*\(\d+\)$/, '') : genreSelect.value}`);
     }
+    if (cloudToggle.checked) bits.push('cloud documents included');
     for (const input of flagInputs) {
-      if (input.checked) bits.push({ loaned: 'loaned out', no_cover: 'without a cover', no_isbn: 'without an ISBN' }[input.dataset.flag]);
+      if (input.checked) bits.push({ no_cover: 'without a cover', no_isbn: 'without an ISBN' }[input.dataset.flag]);
     }
     return bits.join(', ');
   }
@@ -609,7 +615,9 @@
     const params = new URLSearchParams(location.search);
     searchInput.value = params.get('q') || '';
     for (const input of flagInputs) input.checked = params.get(input.dataset.flag) === '1';
-    return { library: params.get('library') || '', genre: params.get('genre') || '' };
+    const library = params.get('library') || '';
+    cloudToggle.checked = params.get('cloud') === '1' || library === 'cloud';
+    return { library, genre: params.get('genre') || '' };
   }
 
   async function loadFilterOptions(wanted) {
@@ -922,7 +930,14 @@
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(load, 250);
   });
-  libSelect.addEventListener('change', load);
+  libSelect.addEventListener('change', () => {
+    if (libSelect.value === 'cloud') cloudToggle.checked = true;
+    load();
+  });
+  cloudToggle.addEventListener('change', () => {
+    if (!cloudToggle.checked && libSelect.value === 'cloud') libSelect.value = '';
+    load();
+  });
   genreSelect.addEventListener('change', load);
   for (const input of flagInputs) input.addEventListener('change', load);
 
@@ -931,6 +946,7 @@
     libSelect.value = '';
     genreSelect.value = '';
     for (const input of flagInputs) input.checked = false;
+    cloudToggle.checked = false;
     load();
   });
 

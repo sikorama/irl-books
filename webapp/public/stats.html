@@ -8,7 +8,10 @@
 </head>
 <body>
 <header class="topbar">
-  <h1>📊 Statistics</h1>
+  <div class="topbar-head">
+    <a href="/" class="secondary icon-btn" title="Back to library">←</a>
+    <h1>📊 Statistics</h1>
+  </div>
   <div class="controls">
     <input id="search" type="search" placeholder="Title, author, publisher, ISBN…">
     <select id="library-filter">
@@ -18,13 +21,12 @@
       <option value="">All genres</option>
     </select>
     <div class="flag-filters">
-      <label title="Loaned"><input type="checkbox" data-flag="loaned"> 🤝</label>
+      <label title="Include cloud documents (PDFs)"><input type="checkbox" id="cloud-toggle"> ☁️</label>
       <label title="No cover"><input type="checkbox" data-flag="no_cover"> 🖼️</label>
       <label title="No ISBN"><input type="checkbox" data-flag="no_isbn"> #️⃣</label>
     </div>
     <button id="reset-btn" class="secondary icon-btn" title="Clear the filters">🧹</button>
     <a id="grid-link" href="/index.html" class="secondary icon-btn" title="See these titles in the catalog">📚</a>
-    <a href="/documents.html" class="secondary icon-btn" title="Cloud — documents">☁️</a>
     <a href="/settings.html" class="secondary icon-btn" title="Settings">⚙️</a>
   </div>
   <div class="status" id="status"></div>

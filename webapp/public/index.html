@@ -8,7 +8,14 @@
 </head>
 <body>
 <header class="topbar">
-  <h1>📚 IRL-Books</h1>
+  <!-- Ajouter un livre n'est pas filtrer : le bouton quitte la rangée des
+       filtres pour la ligne du titre, où il est seul et toujours à la même
+       place. Un seul bouton, plus deux — il tente la caméra et retombe sur la
+       saisie manuelle si l'appareil n'en a pas. -->
+  <div class="topbar-head">
+    <h1>📚 IRL-Books</h1>
+    <button id="add-book-btn" class="primary icon-btn" title="Add a book — scans the barcode if this device has a camera">➕</button>
+  </div>
   <div class="controls">
     <input id="search" type="search" placeholder="Title, author, publisher, ISBN…">
     <select id="library-filter">
@@ -18,14 +25,14 @@
       <option value="">All genres</option>
     </select>
     <div class="flag-filters">
-      <label title="Loaned"><input type="checkbox" data-flag="loaned"> 🤝</label>
+      <!-- ☁️ décide si les documents numériques entrent dans la grille. Décoché
+           par défaut : on range des livres papier, pas des PDF. -->
+      <label title="Include cloud documents (PDFs)"><input type="checkbox" id="cloud-toggle"> ☁️</label>
       <label title="No cover"><input type="checkbox" data-flag="no_cover"> 🖼️</label>
       <label title="No ISBN"><input type="checkbox" data-flag="no_isbn"> #️⃣</label>
     </div>
     <button id="select-toggle-btn" class="secondary icon-btn" title="Select">☑️</button>
-    <button id="add-book-btn" class="primary icon-btn" title="Add a book">➕</button>
-    <button id="scan-book-btn" class="primary icon-btn" title="Scan a book">📷</button>
-    <a href="/documents.html" class="secondary icon-btn" title="Cloud — documents">☁️</a>
+    <a href="/documents.html" class="secondary icon-btn" title="Cloud documents — dedicated page">📄</a>
     <a id="stats-link" href="/stats.html" class="secondary icon-btn" title="Statistics on these titles">📊</a>
     <a href="/settings.html" class="secondary icon-btn" title="Settings">⚙️</a>
   </div>
