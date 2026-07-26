@@ -179,6 +179,71 @@
     }[c]));
   }
 
+  // --- Photo de l'appareil -> couverture ------------------------------------
+  //
+  // Une photo de téléphone fait 3 à 12 Mo pour 4000 px de large. Envoyée telle
+  // quelle, elle était lue en base64 (×1,37 en taille), gardée deux fois en
+  // mémoire — dans le `src` de l'aperçu et dans son `dataset` — puis postée dans
+  // du JSON. Sur un téléphone, cette allocation tombe à l'instant précis où
+  // l'onglet revient au premier plan après l'appareil photo : Android libère la
+  // page, la recharge, et on se retrouve sur la grille sans la photo.
+  //
+  // Une couverture n'a pas besoin de plus de 1200 px : on redimensionne dans le
+  // navigateur avant toute chose. La photo de 8 Mo devient ~200 Ko, ce qui règle
+  // du même coup la mémoire, la taille de l'envoi et le poids en base.
+  const COVER_MAX_EDGE = 1200;
+  const COVER_JPEG_QUALITY = 0.85;
+
+  async function decodeImageFile(file) {
+    // `createImageBitmap` décode hors du fil principal et sait appliquer
+    // l'orientation EXIF — une photo prise en portrait arriverait sinon couchée.
+    if (window.createImageBitmap) {
+      try {
+        return await createImageBitmap(file, { imageOrientation: 'from-image' });
+      } catch {
+        // Option non reconnue par ce navigateur : on retente sans.
+      }
+      try {
+        return await createImageBitmap(file);
+      } catch {
+        // Format refusé ici mais peut-être décodable par <img>.
+      }
+    }
+    const url = URL.createObjectURL(file);
+    try {
+      return await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Unreadable image file.'));
+        img.src = url;
+      });
+    } finally {
+      // L'image est déjà décodée à ce stade : l'URL ne sert plus à rien.
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function fileToCoverDataUrl(file) {
+    const source = await decodeImageFile(file);
+    const scale = Math.min(1, COVER_MAX_EDGE / Math.max(source.width, source.height));
+    const width = Math.max(1, Math.round(source.width * scale));
+    const height = Math.max(1, Math.round(source.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    // Fond blanc d'abord : un PNG transparent deviendrait noir en JPEG.
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(source, 0, 0, width, height);
+    if (source.close) source.close(); // libère l'ImageBitmap sans attendre le GC
+
+    // JPEG : une couverture est une photographie, le PNG la rendrait dix fois
+    // plus lourde pour aucun gain visible.
+    return canvas.toDataURL('image/jpeg', COVER_JPEG_QUALITY);
+  }
+
   // L'URL vient du serveur, parce que les deux collections ne la construisent
   // pas pareil : une fiche papier porte sa révision de couverture (sans elle le
   // navigateur garderait l'ancienne image en cache et changer de couverture
@@ -807,7 +872,15 @@
       if (!res.ok) throw new Error(data.error || `Cover not saved (HTTP ${res.status})`);
       book.cover_rev = data.cover_rev ?? (book.cover_rev || 0) + 1;
       book.has_cover = true;
-      coverImg.src = coverUrl(book);
+      // Le `cover_url` reçu du serveur porte l'ancienne révision, et
+      // `coverUrl()` le rend tel quel dès qu'il existe : on réassignait donc au
+      // `src` exactement l'URL déjà affichée — déclarée `immutable` pour un an
+      // côté serveur. La couverture changeait en base sans changer à l'écran,
+      // et la grille, elle, se rafraîchissait (ses cartes sont rechargées avec
+      // la nouvelle révision), ce qui rendait l'incohérence d'autant plus
+      // visible. On reconstruit l'URL sur la nouvelle révision.
+      book.cover_url = `/api/books/${book.id}/cover?v=${book.cover_rev}`;
+      coverImg.src = book.cover_url;
       await loadBooks();
     }
 
@@ -988,16 +1061,13 @@
       if (!file) return;
       uploadError.textContent = '';
       try {
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(file);
-        });
-        await saveCover(dataUrl);
+        // Même redimensionnement que dans le formulaire d'ajout : une photo
+        // brute de téléphone n'a rien à faire ni en mémoire ni en base.
+        await saveCover(await fileToCoverDataUrl(file));
       } catch (err) {
         uploadError.textContent = err.message;
       }
+      fileInput.value = '';
     });
 
     detailOverlay.classList.remove('hidden');
@@ -1015,14 +1085,22 @@
     }
   }
 
+  // Fermer le formulaire d'ajout est délibéré : le brouillon n'a plus lieu
+  // d'être et ne doit pas revenir au prochain chargement. Seule une disparition
+  // *involontaire* de la page — celle qu'on vient réparer — le laisse en place.
+  function closeOverlay(overlay) {
+    overlay.classList.add('hidden');
+    if (overlay === addOverlay) clearAddDraft();
+  }
+
   document.querySelectorAll('[data-close]').forEach((btn) => {
     btn.addEventListener('click', (e) => {
-      e.target.closest('.overlay').classList.add('hidden');
+      closeOverlay(e.target.closest('.overlay'));
     });
   });
   [detailOverlay, addOverlay, quickLibraryOverlay, quickGenreOverlay].forEach((overlay) => {
     overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) overlay.classList.add('hidden');
+      if (e.target === overlay) closeOverlay(overlay);
     });
   });
 
@@ -1057,7 +1135,86 @@
     librarySelect.value = lastLibrary;
     addGenreSelect.value = lastGenre;
     addOverlay.classList.remove('hidden');
+    clearAddDraft();
   }
+
+  // --- Brouillon du formulaire d'ajout --------------------------------------
+  //
+  // Ouvrir l'appareil photo met la page en arrière-plan, et un téléphone peut
+  // libérer cette page pendant que l'application photo occupe l'écran. Au
+  // retour, le navigateur recharge : la modale a disparu avec tout ce qui y
+  // était saisi, ce qui se lit comme « ça m'a renvoyé à l'accueil ». Le
+  // brouillon est donc écrit à chaque frappe et rendu au chargement suivant.
+  //
+  // `sessionStorage` : ce brouillon ne concerne que l'onglet en cours, et il ne
+  // doit pas ressurgir des jours plus tard. La couverture y est stockée aussi —
+  // redimensionnée elle tient en quelques centaines de Ko, largement sous la
+  // limite du stockage — donc une photo déjà lue survit au rechargement.
+  const ADD_DRAFT_KEY = 'irl-books:addDraft';
+  const DRAFT_FIELDS = ['isbn', 'title', 'authors', 'publisher', 'publishing_year', 'edition', 'library', 'genre', 'notes'];
+
+  function saveAddDraft() {
+    if (addOverlay.classList.contains('hidden')) return;
+    const draft = { cover: coverPreview.dataset.base64 || '', scanner: addFormScannerUsed };
+    for (const name of DRAFT_FIELDS) {
+      const el = addForm.elements[name];
+      if (el) draft[name] = el.value;
+    }
+    draft.loaned = Boolean(addForm.elements.loaned && addForm.elements.loaned.checked);
+    // Un brouillon vide n'a rien à restaurer : le sauver ferait réapparaître une
+    // modale vide au prochain chargement, ce qui serait plus déroutant qu'utile.
+    const hasContent = DRAFT_FIELDS.some((name) => (draft[name] || '').trim()) || draft.cover;
+    try {
+      if (hasContent) sessionStorage.setItem(ADD_DRAFT_KEY, JSON.stringify(draft));
+      else sessionStorage.removeItem(ADD_DRAFT_KEY);
+    } catch {
+      // Quota dépassé ou stockage refusé : on perd le filet, pas le formulaire.
+    }
+  }
+
+  function clearAddDraft() {
+    try {
+      sessionStorage.removeItem(ADD_DRAFT_KEY);
+    } catch {
+      // Rien à faire : sans stockage il n'y avait pas de brouillon.
+    }
+  }
+
+  function restoreAddDraft() {
+    let draft;
+    try {
+      draft = JSON.parse(sessionStorage.getItem(ADD_DRAFT_KEY) || 'null');
+    } catch {
+      return false;
+    }
+    if (!draft) return false;
+
+    openAddForm(); // remet tout à zéro — et efface le brouillon, relu juste avant
+    for (const name of DRAFT_FIELDS) {
+      const el = addForm.elements[name];
+      if (el && draft[name] != null) el.value = draft[name];
+    }
+    if (addForm.elements.loaned) addForm.elements.loaned.checked = Boolean(draft.loaned);
+    librarySelect.value = [...librarySelect.options].some((o) => o.value === draft.library) ? draft.library : '';
+    addFormScannerUsed = Boolean(draft.scanner);
+    if (draft.cover) {
+      coverPreview.src = draft.cover;
+      coverPreview.dataset.base64 = draft.cover;
+    }
+    // Dire pourquoi la modale est là plutôt que de laisser croire à un bug —
+    // et signaler la photo manquante, seule chose que le rechargement peut
+    // avoir emportée : elle n'avait pas encore été lue.
+    isbnLookupStatus.textContent = draft.cover
+      ? 'Draft restored after the page reloaded.'
+      : 'Draft restored after the page reloaded — the cover photo was lost, take it again if you need one.';
+    sessionStorage.setItem(ADD_DRAFT_KEY, JSON.stringify(draft));
+    return true;
+  }
+
+  // Toute frappe dans le formulaire met le brouillon à jour. `input` couvre la
+  // saisie, `change` les listes déroulantes et la case à cocher.
+  addForm.addEventListener('input', saveAddDraft);
+  addForm.addEventListener('change', saveAddDraft);
 
   // Un seul bouton pour ajouter un livre. Les deux d'avant — « ajouter » et
   // « scanner » — menaient au même formulaire ; celui-ci commence par la caméra,
@@ -1300,15 +1457,21 @@
     window.open(`https://www.google.com/search?q=${encodeURIComponent(isbn)}`, '_blank', 'noopener');
   });
 
-  coverInput.addEventListener('change', () => {
+  coverInput.addEventListener('change', async () => {
     const file = coverInput.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      coverPreview.src = reader.result;
-      coverPreview.dataset.base64 = reader.result;
-    };
-    reader.readAsDataURL(file);
+    addError.textContent = '';
+    try {
+      const dataUrl = await fileToCoverDataUrl(file);
+      coverPreview.src = dataUrl;
+      coverPreview.dataset.base64 = dataUrl;
+      saveAddDraft();
+    } catch (err) {
+      addError.textContent = `Could not read that image: ${err.message}`;
+    }
+    // Le champ est vidé pour que reprendre deux fois la même photo déclenche
+    // bien deux `change` : sans cela, choisir le même fichier ne relance rien.
+    coverInput.value = '';
   });
 
   // Les trois actions de couverture du formulaire d'ajout, identiques à celles
@@ -1370,6 +1533,9 @@
       const err = await res.json();
       throw new Error(err.error || 'Unknown error');
     }
+    // Enregistré : le brouillon a rempli son rôle. S'il survivait, le livre
+    // reviendrait en formulaire au prochain chargement, déjà en base.
+    clearAddDraft();
     return payload;
   }
 
@@ -1444,6 +1610,10 @@
         params.delete('openBook');
         const query = params.toString();
         window.history.replaceState({}, '', window.location.pathname + (query ? `?${query}` : ''));
+        return;
       }
+      // Après `loadLibraries`, pour que la liste des pièces existe quand on y
+      // repose la valeur du brouillon.
+      restoreAddDraft();
     });
 })();
