@@ -203,6 +203,39 @@
     return Boolean((title || '').trim() || (authors || '').trim() || (isbn || '').trim());
   }
 
+  // La recherche qui part toute seule à l'ouverture d'une fiche ne part qu'une
+  // fois par livre et par session : sans cela, parcourir les centaines de fiches
+  // sans couverture interrogerait les catalogues à chaque coup d'œil, pour la
+  // même réponse. Le bouton 🔍 et l'enchaînement après une recherche d'ISBN
+  // restent libres — ils sont demandés explicitement, eux.
+  //
+  // `sessionStorage` plutôt qu'une variable : la marque survit à un
+  // rechargement de la page, mais pas à la fermeture de l'onglet — une nouvelle
+  // séance retente, les sources ayant pu s'enrichir entre-temps.
+  const AUTO_SEARCH_KEY = 'irl-books:autoCoverSearched';
+
+  function autoSearchAlreadyDone(bookId) {
+    try {
+      const done = JSON.parse(sessionStorage.getItem(AUTO_SEARCH_KEY) || '[]');
+      return Array.isArray(done) && done.includes(bookId);
+    } catch {
+      return false;
+    }
+  }
+
+  function markAutoSearchDone(bookId) {
+    try {
+      const done = JSON.parse(sessionStorage.getItem(AUTO_SEARCH_KEY) || '[]');
+      const list = Array.isArray(done) ? done : [];
+      if (!list.includes(bookId)) list.push(bookId);
+      sessionStorage.setItem(AUTO_SEARCH_KEY, JSON.stringify(list));
+    } catch {
+      // Stockage indisponible (navigation privée, quota) : on retombe sur le
+      // comportement précédent — la recherche repartira à la prochaine
+      // ouverture. C'est du bruit réseau, pas une perte de données.
+    }
+  }
+
   async function runImageSearch({ host, title, authors, isbn, onPick, sound = false }) {
     const query = { title: (title || '').trim(), authors: (authors || '').trim(), isbn: (isbn || '').trim() };
     if (!coverSearchIsPossible(query)) return 0;
@@ -956,8 +989,12 @@
     // Une fiche sans couverture lance la recherche d'elle-même : c'est la seule
     // raison d'ouvrir une telle fiche neuf fois sur dix, et l'attente des
     // sources court pendant qu'on relit le reste des champs. Avec le son, parce
-    // qu'on n'a pas forcément les yeux sur l'écran quand ça arrive.
-    if (!book.has_cover && coverSearchIsPossible({ title: book.title, authors: (book.authors || []).join(', '), isbn: book.isbn })) {
+    // qu'on n'a pas forcément les yeux sur l'écran quand ça arrive. Une fois par
+    // livre et par session — rouvrir la même fiche ne rappelle pas les sources.
+    if (!book.has_cover
+      && !autoSearchAlreadyDone(book.id)
+      && coverSearchIsPossible({ title: book.title, authors: (book.authors || []).join(', '), isbn: book.isbn })) {
+      markAutoSearchDone(book.id);
       searchCover({ sound: true });
     }
   }
