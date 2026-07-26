@@ -451,11 +451,12 @@ main { padding: 1.5rem; }
 
 form .form-grid { display: flex; gap: 1.2rem; flex-wrap: wrap; }
 /* La colonne couverture du formulaire d'ajout se cale sur la largeur de sa
-   vignette (140px, contre 160 sur la fiche détaillée) : sinon la rangée des
-   trois actions dépasserait l'image qu'elle sert. */
-form .form-grid .cover-col { width: 140px; }
+   vignette : sinon la rangée des trois actions dépasserait l'image qu'elle sert.
+   180px sur une fenêtre de 640 — assez pour juger une couverture rapportée par
+   un catalogue, loin d'occuper la largeur de la fenêtre. */
+form .form-grid .cover-col { width: 180px; }
 .cover-picker {
-  width: 140px;
+  width: 180px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -464,16 +465,25 @@ form .form-grid .cover-col { width: 140px; }
   cursor: pointer;
 }
 .cover-picker input[type=file] { display: none; }
+/* Boîte de hauteur fixe et `contain` plutôt que `cover` : la couverture est
+   montrée entière — un recadrage mangerait le titre, qui est souvent ce qu'on
+   vérifie — et le formulaire ne sursaute pas quand une image arrive après la
+   recherche par ISBN, puisque la place était déjà réservée. */
 .cover-picker img {
-  width: 140px;
-  height: 210px;
-  object-fit: cover;
+  width: 100%;
+  height: 265px;
+  object-fit: contain;
+  background: var(--bg);
   border-radius: 8px;
   border: 1px solid var(--border);
 }
 .cover-picker span { font-size: 0.75rem; color: var(--text-dim); text-align: center; }
 
-.fields { flex: 1 1 260px; display: grid; gap: 0.6rem; }
+/* `min-width: 0` parce qu'un élément flex refuse par défaut de passer sous la
+   largeur minimale de son contenu : la rangée ISBN (champ + trois boutons de
+   largeur fixe) tenait ainsi la colonne à 384px et faisait déborder la fenêtre
+   latéralement sur un téléphone — précisément l'appareil sur lequel on scanne. */
+.fields { flex: 1 1 260px; min-width: 0; display: grid; gap: 0.6rem; }
 .fields label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--text-dim); }
 .fields input, .fields textarea {
   padding: 0.45rem 0.6rem;
@@ -488,12 +498,20 @@ form .form-grid .cover-col { width: 140px; }
 .checkbox-row { display: flex; gap: 1rem; flex-wrap: wrap; }
 .checkbox-row label { flex-direction: row; align-items: center; }
 
-.isbn-row { display: flex; gap: 0.5rem; }
-.isbn-row input { flex: 1; }
+/* Les boutons passent à la ligne plutôt que d'élargir la rangée : sur un écran
+   étroit, mieux vaut deux lignes qu'un débordement horizontal. */
+.isbn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.isbn-row input { flex: 1 1 8rem; min-width: 0; }
 .isbn-row button { white-space: nowrap; }
 .isbn-lookup-status { font-size: 0.75rem; color: var(--text-dim); min-height: 1.1em; margin: 0.2rem 0 0; }
 
-.form-actions { display: flex; justify-content: flex-end; align-items: center; gap: 1rem; margin-top: 1rem; }
+/* En tête de la colonne des champs, donc à droite de la vignette. Le message
+   d'erreur prend la place restante et peut passer à la ligne ; les boutons, eux,
+   ne se laissent pas comprimer — leur position ne doit pas dépendre de la
+   longueur du texte à côté. */
+.form-actions { display: flex; justify-content: flex-end; align-items: center; gap: 1rem; margin: 0; }
+.form-actions .error { flex: 1; }
+.form-actions button { flex-shrink: 0; }
 .error { color: #c0392b; font-size: 0.8rem; }
 
 .duplicates-modal { max-width: 720px; }

@@ -144,6 +144,15 @@
           </div>
         </div>
         <div class="fields">
+          <!-- Enregistrer est l'action de cette fenêtre, pas la conclusion d'une
+               liste : les boutons sont en tête, à droite de la vignette, donc
+               visibles sans dérouler le formulaire. Un livre scanné se valide le
+               plus souvent sans rien relire. -->
+          <div class="form-actions">
+            <span id="add-error" class="error"></span>
+            <button type="button" id="add-another-btn" class="secondary" title="Save and add another">OK +1</button>
+            <button type="submit" class="primary icon-btn" title="Save">💾</button>
+          </div>
           <label class="full">ISBN
             <div class="isbn-row">
               <input name="isbn" type="text" id="isbn-input" inputmode="numeric" placeholder="9782020796569">
@@ -174,11 +183,6 @@
             <label title="Loaned"><input type="checkbox" name="loaned"> 🤝</label>
           </div>
         </div>
-      </div>
-      <div class="form-actions">
-        <span id="add-error" class="error"></span>
-        <button type="button" id="add-another-btn" class="secondary" title="Save and add another">OK +1</button>
-        <button type="submit" class="primary icon-btn" title="Save">💾</button>
       </div>
     </form>
   </div>
