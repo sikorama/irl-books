@@ -666,7 +666,7 @@
     }
   });
 
-  const HOME_RANDOM_LIMIT = 500;
+  const HOME_RANDOM_LIMIT = 50;
 
   async function loadBooks() {
     const qs = buildQuery();
