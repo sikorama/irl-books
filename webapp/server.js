@@ -152,7 +152,15 @@ function bookFilter(query) {
 
 function listBooks(query) {
   const { where, params } = bookFilter(query);
-  const sql = `SELECT ${BOOK_COLUMNS} FROM books ${where} ORDER BY title COLLATE NOCASE ASC`;
+  const limit = Number(query.limit);
+  // La homepage sans filtre demande un tirage aléatoire (`random=1&limit=n`)
+  // plutôt que tout le catalogue : on pioche `n` lignes au hasard en SQL, puis on
+  // les trie par titre comme le reste — seul l'échantillon change à chaque appel.
+  const useRandom = query.random === '1' && Number.isInteger(limit) && limit > 0;
+  const sql = useRandom
+    ? `SELECT * FROM (SELECT ${BOOK_COLUMNS} FROM books ${where} ORDER BY RANDOM() LIMIT @limit) ORDER BY title COLLATE NOCASE ASC`
+    : `SELECT ${BOOK_COLUMNS} FROM books ${where} ORDER BY title COLLATE NOCASE ASC`;
+  if (useRandom) params.limit = limit;
   const rows = db.prepare(sql).all(params);
   return rows.map(rowToBook);
 }

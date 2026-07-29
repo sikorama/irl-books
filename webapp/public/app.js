@@ -666,20 +666,31 @@
     }
   });
 
+  const HOME_RANDOM_LIMIT = 500;
+
   async function loadBooks() {
     const qs = buildQuery();
     // La page de statistiques lit les mêmes paramètres que cette grille : le lien
     // les emporte, pour que « filtrer ici puis regarder les chiffres » porte sur
-    // exactement la sélection qu'on a sous les yeux.
+    // exactement la sélection qu'on a sous les yeux. Il ignore volontairement
+    // l'échantillon aléatoire ci-dessous : les stats portent sur le catalogue
+    // réel, pas sur les 500 vignettes affichées à l'écran.
     if (statsLink) statsLink.href = `/stats.html${qs ? '?' + qs : ''}`;
     status.textContent = 'Loading…';
-    const res = await fetch(`/api/books${qs ? '?' + qs : ''}`);
+    // Sans filtre, on est sur la vue d'accueil : charger tout le catalogue (et
+    // autant de couvertures) à chaque ouverture est ce qui rend le premier
+    // affichage lourd. On tire à la place un échantillon aléatoire, renouvelé à
+    // chaque chargement — dès qu'un filtre ou une recherche est actif, on repasse
+    // sur le catalogue complet et filtré.
+    const isHome = !qs;
+    const requestQs = isHome ? `random=1&limit=${HOME_RANDOM_LIMIT}` : qs;
+    const res = await fetch(`/api/books?${requestQs}`);
     const books = await res.json();
     currentBooks = books;
     grid.innerHTML = '';
     for (const book of books) grid.appendChild(renderCard(book));
     empty.classList.toggle('hidden', books.length > 0);
-    status.textContent = `${books.length} book${books.length !== 1 ? 's' : ''}`;
+    status.textContent = `${books.length} book${books.length !== 1 ? 's' : ''}${isHome ? ' (random sample)' : ''}`;
     updateSelectionUI();
   }
 
