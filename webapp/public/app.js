@@ -9,6 +9,8 @@
   const flagInputs = [...document.querySelectorAll('.flag-filters input[data-flag]')];
   const cloudToggle = document.getElementById('cloud-toggle');
   const statsLink = document.getElementById('stats-link');
+  const filtersToggleBtn = document.getElementById('filters-toggle-btn');
+  const filtersPanel = document.getElementById('filters-panel');
 
   const detailOverlay = document.getElementById('detail-overlay');
   const detailContent = document.getElementById('detail-content');
@@ -667,6 +669,12 @@
   });
 
   const HOME_RANDOM_LIMIT = 50;
+  // Les id du dernier tirage aléatoire affiché sur la homepage. Tant qu'on reste
+  // sans filtre, un `loadBooks()` (édition de couverture, changement de pièce…)
+  // recharge ces mêmes livres au lieu d'en retirer d'autres au hasard : le
+  // tirage ne se renouvelle qu'en arrivant sur la homepage ou en quittant un
+  // filtre/une recherche, pas à chaque rafraîchissement de la vue.
+  let homeSampleIds = null;
 
   async function loadBooks() {
     const qs = buildQuery();
@@ -674,24 +682,41 @@
     // les emporte, pour que « filtrer ici puis regarder les chiffres » porte sur
     // exactement la sélection qu'on a sous les yeux. Il ignore volontairement
     // l'échantillon aléatoire ci-dessous : les stats portent sur le catalogue
-    // réel, pas sur les 500 vignettes affichées à l'écran.
+    // réel, pas sur les vignettes affichées à l'écran.
     if (statsLink) statsLink.href = `/stats.html${qs ? '?' + qs : ''}`;
     status.textContent = 'Loading…';
     // Sans filtre, on est sur la vue d'accueil : charger tout le catalogue (et
     // autant de couvertures) à chaque ouverture est ce qui rend le premier
-    // affichage lourd. On tire à la place un échantillon aléatoire, renouvelé à
-    // chaque chargement — dès qu'un filtre ou une recherche est actif, on repasse
-    // sur le catalogue complet et filtré.
+    // affichage lourd. On tire à la place un échantillon aléatoire — renouvelé
+    // seulement en arrivant sur cette vue, pas à chaque rechargement — dès
+    // qu'un filtre ou une recherche est actif, on repasse sur le catalogue
+    // complet et filtré.
     const isHome = !qs;
-    const requestQs = isHome ? `random=1&limit=${HOME_RANDOM_LIMIT}` : qs;
+    let requestQs;
+    if (isHome) {
+      requestQs = homeSampleIds ? `ids=${homeSampleIds.join(',')}` : `random=1&limit=${HOME_RANDOM_LIMIT}`;
+    } else {
+      homeSampleIds = null;
+      requestQs = qs;
+    }
     const res = await fetch(`/api/books?${requestQs}`);
     const books = await res.json();
+    if (isHome && !homeSampleIds) homeSampleIds = books.map((b) => b.id);
     currentBooks = books;
     grid.innerHTML = '';
     for (const book of books) grid.appendChild(renderCard(book));
     empty.classList.toggle('hidden', books.length > 0);
     status.textContent = `${books.length} book${books.length !== 1 ? 's' : ''}${isHome ? ' (random sample)' : ''}`;
     updateSelectionUI();
+    updateFiltersIndicator();
+  }
+
+  // Le panneau replié cache aussi son état : le point sur ☰ dit qu'un filtre
+  // (autre que la recherche, déjà visible) reste actif derrière.
+  function updateFiltersIndicator() {
+    const active = Boolean(libSelect.value || genreSelect.value || cloudToggle.checked
+      || flagInputs.some((i) => i.checked));
+    filtersToggleBtn.classList.toggle('has-filters', active);
   }
 
   function debouncedLoad() {
@@ -715,6 +740,11 @@
     loadBooks();
   });
   flagInputs.forEach((i) => i.addEventListener('change', loadBooks));
+
+  filtersToggleBtn.addEventListener('click', () => {
+    filtersPanel.classList.toggle('hidden');
+    filtersToggleBtn.classList.toggle('active', !filtersPanel.classList.contains('hidden'));
+  });
 
   selectToggleBtn.addEventListener('click', () => setSelectMode(!selectMode));
   cancelSelectBtn.addEventListener('click', () => setSelectMode(false));

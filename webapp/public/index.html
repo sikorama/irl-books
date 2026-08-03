@@ -16,8 +16,15 @@
     <h1>📚 IRL-Books</h1>
     <button id="add-book-btn" class="primary icon-btn" title="Add a book — scans the barcode if this device has a camera">➕</button>
   </div>
+  <!-- Seules la recherche et l'ajout (dans topbar-head) restent toujours visibles.
+       Tout le reste — filtres, sélection, liens — vit dans le panneau repliable
+       ci-dessous : sur un petit écran, la rangée de contrôles ne dépasse pas la
+       hauteur de la barre de recherche tant qu'on n'a rien à filtrer. -->
   <div class="controls">
     <input id="search" type="search" placeholder="Title, author, publisher, ISBN…">
+    <button id="filters-toggle-btn" class="secondary icon-btn" title="Filters &amp; tools">☰</button>
+  </div>
+  <div id="filters-panel" class="filters-panel hidden">
     <select id="library-filter">
       <option value="">All rooms</option>
     </select>
@@ -36,7 +43,6 @@
     <a id="stats-link" href="/stats.html" class="secondary icon-btn" title="Statistics on these titles">📊</a>
     <a href="/settings.html" class="secondary icon-btn" title="Settings">⚙️</a>
   </div>
-  <div class="status" id="status"></div>
 </header>
 
 <div id="selection-bar" class="selection-bar hidden">
@@ -54,6 +60,7 @@
 </div>
 
 <main>
+  <p class="list-status" id="status"></p>
   <div id="grid" class="grid"></div>
   <p id="empty" class="empty hidden">No book matches these criteria.</p>
 </main>

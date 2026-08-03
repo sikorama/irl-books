@@ -62,6 +62,13 @@ body {
   align-items: center;
 }
 
+/* Petit écran : le bandeau ne garde que sa marge minimale, la recherche et le
+   bouton ➕ n'ont pas besoin de plus. */
+@media (max-width: 480px) {
+  .topbar { padding: 0.7rem 0.9rem; }
+  .topbar-head { margin-bottom: 0.6rem; }
+}
+
 #search {
   flex: 1 1 240px;
   padding: 0.5rem 0.75rem;
@@ -134,9 +141,36 @@ button.primary:hover { filter: brightness(1.08); }
   padding: 0.05rem 0.45rem;
 }
 
-.status { margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-dim); }
+/* Le compte de résultats vit ici plutôt que dans le bandeau du haut : il ne coûte
+   de la place qu'à la liste qu'il décrit, jamais à la barre toujours visible. */
+.list-status { margin: 0 0 0.8rem; font-size: 0.8rem; color: var(--text-dim); }
 
 main { padding: 1.5rem; }
+
+/* Repliable : sur mobile la rangée de contrôles ne dépasse jamais la hauteur de
+   la barre de recherche. Le bouton ☰ porte un point quand un filtre autre que la
+   recherche est actif, pour qu'un filtre oublié dans le panneau fermé ne
+   surprenne pas. */
+.filters-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}
+#filters-toggle-btn { position: relative; }
+#filters-toggle-btn.has-filters::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+}
 
 .grid {
   display: grid;

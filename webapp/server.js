@@ -146,6 +146,13 @@ function bookFilter(query) {
   if (query.no_isbn === '1') {
     clauses.push("(isbn IS NULL OR isbn = '')");
   }
+  // Reprend un échantillon aléatoire précédent tel quel (mêmes id) : sert à
+  // rafraîchir la homepage après une édition sans en retirer un nouveau.
+  if (query.ids) {
+    const ids = String(query.ids).split(',').map(Number).filter(Number.isInteger);
+    clauses.push(ids.length ? `id IN (${ids.map((_, i) => `@id${i}`).join(',')})` : '0');
+    ids.forEach((id, i) => { params[`id${i}`] = id; });
+  }
 
   return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
 }
